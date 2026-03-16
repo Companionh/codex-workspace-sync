@@ -28,6 +28,7 @@ The repo contains:
 - `skills/shared/` lightweight skills shared by all superprojects
 - `scripts/windows/` convenience launchers for the sync shell
 - `scripts/server/` convenience launchers for the Hetzner service
+- `tools/` publishing helpers used to export a sanitized GitHub tree
 
 ## Quick start
 
@@ -40,13 +41,21 @@ The repo contains:
 
 ## Windows repo push helper
 
-Use `scripts\\windows\\push-repo.bat` to stage, commit, and push this repo from Windows.
+Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.
 
-- It uses the current repo remote by default.
-- If `scripts\\windows\\push-config.local.cmd` exists, it loads your token and defaults from there.
-- It supports GitHub username + fine-grained token authentication for private repos.
-- If the working tree is dirty, it prompts for a commit message unless `COMMIT_MESSAGE` is already set.
+- It mirrors the `telegram-scraper-bot` workflow instead of pushing from the live checkout.
+- It exports a curated project tree into `backups\\push_tmp_repo`, commits there, and pushes from that temp checkout.
+- If `scripts\\windows\\push-config.local.cmd` exists, it loads your repo URL, branch, username, token, and temp-checkout path from there.
+- The temp checkout keeps `origin` on the clean GitHub URL, so the token is not written into the remote config.
 - The local config file is ignored by Git so your token stays out of the repo history.
+
+## Hetzner repo update helper
+
+Use `scripts/server/update_from_github.sh` on the server-side app checkout to fast-forward from GitHub.
+
+- GitHub credentials can live in `scripts/server/github.env` or `/etc/codex-workspace-sync/github.env`.
+- The script creates a pre-update backup of live sync state before pulling.
+- It can autostash temporary code changes, reinstall the editable package, and optionally restart a service unit after updating.
 
 ## Key commands
 

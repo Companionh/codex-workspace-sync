@@ -17,4 +17,7 @@ Thumbs.db
 .cws/
 state/
 tmp/
+backups/
+server_backups/
 scripts/windows/push-config.local.cmd
+scripts/server/github.env

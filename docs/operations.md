@@ -30,3 +30,20 @@ Typical flow:
 4. inspect `status` when changing devices
 5. run `turn-off-sync` manually if desired, or allow the server lease to expire automatically
 
+## Publishing code from Windows
+
+`codex-workspace-sync` uses the same safe publish pattern as `telegram-scraper-bot`.
+
+1. Copy `scripts/windows/push-config.example.cmd` to `scripts/windows/push-config.local.cmd`.
+2. Fill in the repo URL, branch, username, token, and optional temp checkout path.
+3. Run `scripts/windows/push-repo.bat`.
+
+The script exports only the tracked project tree needed for GitHub publishing into a temp checkout under `backups/push_tmp_repo`, then commits and pushes from there. Local runtime state, secrets, caches, and server backups are excluded from the export.
+
+## Updating code on Hetzner
+
+1. Copy `scripts/server/github.env.template` to `scripts/server/github.env` or `/etc/codex-workspace-sync/github.env`.
+2. Fill in the GitHub username, fine-grained token, and repo URL.
+3. Run `scripts/server/update_from_github.sh`.
+
+The updater creates a pre-update backup of the live sync state, fast-forwards the checkout, refreshes the editable Python install, and runs a compile check. Use `--restart` with `--restart-unit <unit>` if you also want it to restart a service after the update.

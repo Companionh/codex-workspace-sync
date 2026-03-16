@@ -38,7 +38,8 @@ include = [
   "README.md",
   "docs/**/*",
   "skills/**/*",
-  "scripts/**/*"
+  "scripts/**/*",
+  "tools/**/*"
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -46,4 +47,3 @@ packages = ["src/cws"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
