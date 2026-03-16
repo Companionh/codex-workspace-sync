@@ -44,9 +44,7 @@ Prompt meanings during enrollment:
 - `SSH password`: the Linux account password, usually blank when SSH keys are used
 - `SSH key passphrase`: the passphrase that unlocks the local private key on Windows
 
-
 Enrollment only registers the device and stores its credentials. It does not automatically create local bindings for server-side superprojects. If `telegram-bots-suite` already exists on the server, run `attach-superproject` once on each new machine before using `update-from-server`.
-
 ## Publishing code from Windows
 
 `codex-workspace-sync` uses the same safe publish pattern as `telegram-scraper-bot`.
