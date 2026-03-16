@@ -4,6 +4,7 @@ set "GIT_TERMINAL_PROMPT=0"
 set "GCM_INTERACTIVE=never"
 set "GCM_PRESERVE_CREDS=0"
 set "CWS_PAUSE_ON_ERROR=1"
+set "ASKPASS_FILE="
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "REPO_ROOT=%%~fI"
@@ -47,18 +48,34 @@ if not defined GITHUB_REPO_URL set /p GITHUB_REPO_URL=GitHub repo URL:
 if not defined GITHUB_USERNAME set /p GITHUB_USERNAME=GitHub username:
 if not defined GITHUB_PAT set /p GITHUB_PAT=GitHub fine-grained token:
 
-for /f "delims=" %%I in ('powershell -NoProfile -Command "[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(''%GITHUB_USERNAME%:%GITHUB_PAT%''))"') do set "AUTH_B64=%%I"
+set "ASKPASS_FILE=%TEMP%\cws_git_askpass_%RANDOM%_%RANDOM%.cmd"
+(
+  echo @echo off
+  echo setlocal
+  echo set "PROMPT_TEXT=%%~1"
+  echo echo %%PROMPT_TEXT%% ^| findstr /I "username" ^>nul
+  echo if not errorlevel 1 ^(
+  echo   echo %%CWS_GIT_USERNAME%%
+  echo   exit /b 0
+  echo ^)
+  echo echo %%CWS_GIT_PASSWORD%%
+)>"%ASKPASS_FILE%"
 
-if not defined AUTH_B64 (
-  echo Failed to prepare GitHub authorization header.
+if not exist "%ASKPASS_FILE%" (
+  echo Failed to prepare temporary Git askpass helper.
   popd >nul
   goto :error_exit
 )
 
+set "GIT_ASKPASS=%ASKPASS_FILE%"
+set "SSH_ASKPASS=%ASKPASS_FILE%"
+set "CWS_GIT_USERNAME=%GITHUB_USERNAME%"
+set "CWS_GIT_PASSWORD=%GITHUB_PAT%"
+
 if not exist "%PUBLISH_CHECKOUT%\.git" (
   echo Local publish checkout missing. Cloning into:
   echo   %PUBLISH_CHECKOUT%
-  "%GIT_EXE%" -c credential.helper= -c credential.interactive=never -c "http.https://github.com/.extraheader=AUTHORIZATION: basic %AUTH_B64%" clone "%GITHUB_REPO_URL%" "%PUBLISH_CHECKOUT%"
+  "%GIT_EXE%" -c credential.helper= -c core.askPass="%ASKPASS_FILE%" -c credential.interactive=never clone "%GITHUB_REPO_URL%" "%PUBLISH_CHECKOUT%"
   if errorlevel 1 (
     echo git clone failed.
     popd >nul
@@ -68,7 +85,7 @@ if not exist "%PUBLISH_CHECKOUT%\.git" (
 
 pushd "%PUBLISH_CHECKOUT%" >nul
 "%GIT_EXE%" remote set-url origin "%GITHUB_REPO_URL%" >nul 2>nul
-"%GIT_EXE%" -c credential.helper= -c credential.interactive=never -c "http.https://github.com/.extraheader=AUTHORIZATION: basic %AUTH_B64%" fetch origin "%GITHUB_BRANCH%" >nul 2>nul
+"%GIT_EXE%" -c credential.helper= -c core.askPass="%ASKPASS_FILE%" -c credential.interactive=never fetch origin "%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 (
   "%GIT_EXE%" checkout -B "%GITHUB_BRANCH%"
 ) else (
@@ -144,7 +161,7 @@ if errorlevel 1 (
 
 echo.
 echo Pushing to origin %GITHUB_BRANCH%...
-"%GIT_EXE%" -c credential.helper= -c credential.interactive=never -c "http.https://github.com/.extraheader=AUTHORIZATION: basic %AUTH_B64%" push origin "%GITHUB_BRANCH%"
+"%GIT_EXE%" -c credential.helper= -c core.askPass="%ASKPASS_FILE%" -c credential.interactive=never push origin "%GITHUB_BRANCH%"
 if errorlevel 1 (
   echo git push failed.
   popd >nul
@@ -161,10 +178,12 @@ popd >nul
 goto :success_exit
 
 :error_exit
+if defined ASKPASS_FILE if exist "%ASKPASS_FILE%" del "%ASKPASS_FILE%" >nul 2>nul
 if "%CWS_PAUSE_ON_ERROR%"=="1" pause
 endlocal
 exit /b 1
 
 :success_exit
+if defined ASKPASS_FILE if exist "%ASKPASS_FILE%" del "%ASKPASS_FILE%" >nul 2>nul
 endlocal
 exit /b 0
