@@ -34,7 +34,7 @@ For first-time device enrollment from Windows, use:
 
 - `scripts/windows/cws-enroll-device.bat`
 
-That launcher always pauses at the end so the operator can read any enrollment error output.
+That launcher forces a persistent `cmd` window so the operator can read any enrollment error output. It also writes logs under `%LOCALAPPDATA%\CodexWorkspaceSync\logs\`.
 
 ## Publishing code from Windows
 

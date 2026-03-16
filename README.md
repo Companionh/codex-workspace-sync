@@ -43,6 +43,8 @@ If you want a Windows launcher that stays open after enrollment succeeds or fail
 
 - `scripts\\windows\\cws-enroll-device.bat`
 
+That launcher runs against the repo's local `src` tree, forces a persistent `cmd` window, and writes logs under `%LOCALAPPDATA%\\CodexWorkspaceSync\\logs\\`.
+
 ## Windows repo push helper
 
 Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.

@@ -8,24 +8,55 @@ from pathlib import Path
 import typer
 
 from cws.client.sync import ClientService
+from cws.config import ClientPaths
 from cws.shell import CWSShell
+from cws.utils import utc_now
 
-app = typer.Typer(help="Codex Workspace Sync client.")
+app = typer.Typer(
+    help="Codex Workspace Sync client.",
+    pretty_exceptions_enable=False,
+    pretty_exceptions_show_locals=False,
+)
 
 
 def service() -> ClientService:
     return ClientService()
 
 
+def enrollment_log_file() -> Path:
+    return ClientPaths.default().root / "logs" / "cws-enroll-device.log"
+
+
+def append_enrollment_log(message: str) -> None:
+    log_path = enrollment_log_file()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{utc_now().isoformat()}] {message}\n")
+
+
 def enroll_device_interactive(client: ClientService) -> None:
+    append_enrollment_log("Starting interactive device enrollment.")
     server_url = typer.prompt("Server URL", default="http://127.0.0.1:8787")
     ssh_host = typer.prompt("SSH host")
     ssh_user = typer.prompt("SSH user")
     ssh_port = int(typer.prompt("SSH port", default="22"))
     device_name = typer.prompt("Device name")
+    typer.echo("Secondary passphrase = the passphrase you set when you ran `cws-server init` on Hetzner.")
     secondary_passphrase = typer.prompt("Secondary passphrase", hide_input=True)
-    ssh_password = typer.prompt("SSH password", hide_input=True, default="", show_default=False) or None
-    github_pat = typer.prompt("GitHub PAT (optional)", hide_input=True, default="", show_default=False) or None
+    typer.echo("SSH password = your Linux account password. Leave it blank if you log in with an SSH key.")
+    ssh_password = typer.prompt(
+        "SSH password (leave blank for SSH key login)",
+        hide_input=True,
+        default="",
+        show_default=False,
+    ) or None
+    typer.echo("GitHub PAT is optional here. Press Enter to skip unless you want private-repo metadata lookups.")
+    github_pat = typer.prompt(
+        "GitHub PAT (optional)",
+        hide_input=True,
+        default="",
+        show_default=False,
+    ) or None
     response = client.enroll_device(
         server_url=server_url,
         ssh_host=ssh_host,
@@ -131,12 +162,18 @@ def status() -> None:
 @app.command("enroll-device")
 def enroll_device() -> None:
     try:
+        append_enrollment_log("Enroll command invoked.")
         enroll_device_interactive(service())
+        append_enrollment_log("Enrollment completed successfully.")
     except Exception as exc:
+        trace = traceback.format_exc()
+        append_enrollment_log(f"Enrollment failed: {exc}")
+        append_enrollment_log(trace.rstrip())
         typer.echo("")
         typer.echo(f"Enrollment failed: {exc}", err=True)
+        typer.echo(f"Debug log: {enrollment_log_file()}", err=True)
         typer.echo("")
-        traceback.print_exc()
+        typer.echo(trace, err=True)
         raise typer.Exit(code=1)
 
 

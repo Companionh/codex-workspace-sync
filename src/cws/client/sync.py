@@ -175,12 +175,19 @@ class ClientService:
             password=ssh_password,
             timeout=20.0,
         )
-        command = (
-            "python3 -m cws.server.bootstrap register-device "
+        remote_script = (
+            'APP_ROOT="${CWS_APP_ROOT:-/opt/codex-workspace-sync/app}"; '
+            'if [ -x "$APP_ROOT/.venv/bin/python" ]; then '
+            '  PY_BIN="$APP_ROOT/.venv/bin/python"; '
+            "else "
+            '  PY_BIN="python3"; '
+            "fi; "
+            '"$PY_BIN" -m cws.server.bootstrap register-device '
             f"--device-name {shlex.quote(device_name)} "
             f"--secondary-passphrase {shlex.quote(secondary_passphrase)} "
             f"--metadata-json {shlex.quote(json.dumps(metadata))}"
         )
+        command = f"bash -lc {shlex.quote(remote_script)}"
         _, stdout, stderr = client.exec_command(command)
         exit_code = stdout.channel.recv_exit_status()
         output = stdout.read().decode("utf-8")
