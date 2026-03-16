@@ -30,6 +30,12 @@ Typical flow:
 4. inspect `status` when changing devices
 5. run `turn-off-sync` manually if desired, or allow the server lease to expire automatically
 
+For first-time device enrollment from Windows, use:
+
+- `scripts/windows/cws-enroll-device.bat`
+
+That launcher always pauses at the end so the operator can read any enrollment error output.
+
 ## Publishing code from Windows
 
 `codex-workspace-sync` uses the same safe publish pattern as `telegram-scraper-bot`.

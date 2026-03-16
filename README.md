@@ -39,6 +39,10 @@ The repo contains:
 5. Enroll a Windows device: `cws enroll-device`
 6. Launch the sync shell: `scripts\\windows\\cws-shell.bat`
 
+If you want a Windows launcher that stays open after enrollment succeeds or fails, use:
+
+- `scripts\\windows\\cws-enroll-device.bat`
+
 ## Windows repo push helper
 
 Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.

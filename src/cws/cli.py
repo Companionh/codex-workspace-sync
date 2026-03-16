@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 from pathlib import Path
 
 import typer
@@ -129,7 +130,14 @@ def status() -> None:
 
 @app.command("enroll-device")
 def enroll_device() -> None:
-    enroll_device_interactive(service())
+    try:
+        enroll_device_interactive(service())
+    except Exception as exc:
+        typer.echo("")
+        typer.echo(f"Enrollment failed: {exc}", err=True)
+        typer.echo("")
+        traceback.print_exc()
+        raise typer.Exit(code=1)
 
 
 @app.command("create-superproject")
