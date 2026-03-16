@@ -119,8 +119,31 @@ if errorlevel 1 (
 
 "%GIT_EXE%" diff --cached --quiet
 if not errorlevel 1 (
+  for /f "tokens=1,2" %%I in ('"%GIT_EXE%" rev-list --left-right --count HEAD...origin/%GITHUB_BRANCH% 2^>nul') do (
+    set "AHEAD_COUNT=%%I"
+    set "BEHIND_COUNT=%%J"
+  )
+  if not defined AHEAD_COUNT set "AHEAD_COUNT=0"
+  if not defined BEHIND_COUNT set "BEHIND_COUNT=0"
   echo.
-  echo No staged changes to commit.
+  if not "%AHEAD_COUNT%"=="0" (
+    echo No new staged changes, but the publish checkout is ahead of origin/%GITHUB_BRANCH% by %AHEAD_COUNT% commit^(s^).
+    echo Pushing existing unpublished commit^(s^)...
+    "%GIT_EXE%" push origin "%GITHUB_BRANCH%"
+    if errorlevel 1 (
+      echo git push failed.
+      popd >nul
+      popd >nul
+      goto :error_exit
+    )
+    echo.
+    echo Push successful. Latest commit:
+    "%GIT_EXE%" log --oneline -1
+    popd >nul
+    popd >nul
+    goto :success_exit
+  )
+  echo No staged changes to commit and no unpublished commits to push.
   popd >nul
   popd >nul
   goto :success_exit
