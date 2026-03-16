@@ -38,6 +38,16 @@ The repo contains:
 5. Enroll a Windows device: `cws enroll-device`
 6. Launch the sync shell: `scripts\\windows\\cws-shell.bat`
 
+## Windows repo push helper
+
+Use `scripts\\windows\\push-repo.bat` to stage, commit, and push this repo from Windows.
+
+- It uses the current repo remote by default.
+- If `scripts\\windows\\push-config.local.cmd` exists, it loads your token and defaults from there.
+- It supports GitHub username + fine-grained token authentication for private repos.
+- If the working tree is dirty, it prompts for a commit message unless `COMMIT_MESSAGE` is already set.
+- The local config file is ignored by Git so your token stays out of the repo history.
+
 ## Key commands
 
 - `cws shell`
@@ -56,4 +66,3 @@ The repo contains:
 - Shared skills live in the repo because they are lightweight and reusable.
 - The current v1 stores synced payloads in plaintext on the server by design.
 - The storage layer is intentionally modular so payload encryption can be added later.
-

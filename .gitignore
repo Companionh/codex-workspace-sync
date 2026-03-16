@@ -17,4 +17,4 @@ Thumbs.db
 .cws/
 state/
 tmp/
-
+scripts/windows/push-config.local.cmd
