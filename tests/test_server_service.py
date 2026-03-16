@@ -144,3 +144,30 @@ def test_push_checkpoint_rejects_missing_protected_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         service.push_checkpoint(device.device.device_id, request)
+
+
+def test_delete_superproject_removes_server_state(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    )
+
+    result = service.delete_superproject(
+        "telegram-suite",
+        requesting_device_id=device.device.device_id,
+    )
+
+    assert result["deleted"] is True
+    assert not (tmp_path / "state" / "superprojects" / "telegram-suite").exists()
+    with pytest.raises(FileNotFoundError):
+        service.get_manifest("telegram-suite")

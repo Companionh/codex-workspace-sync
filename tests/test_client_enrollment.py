@@ -261,3 +261,30 @@ def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) 
     assert (tmp_path / ".codex" / "session_index.jsonl").read_text(encoding="utf-8") == "index"
     assert not (tmp_path / ".codex" / "state_5.sqlite-shm").exists()
     assert not (tmp_path / ".codex" / "sessions" / "2026" / "03" / "16" / "test-session.jsonl").exists()
+
+
+def test_disconnect_superproject_wipes_local_managed_root(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    (managed_root / "baseline").mkdir(parents=True, exist_ok=True)
+    (managed_root / "baseline" / "base_rules.md").write_text("rules", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    config = ClientConfig(
+        superprojects={
+            "telegram-bots-suite": ClientSuperprojectState(
+                slug="telegram-bots-suite",
+                name="telegram-bots-suite",
+                managed_root=str(managed_root),
+            )
+        }
+    )
+    state_store.save_config(config)
+
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    result = service.disconnect_superproject("telegram-bots-suite")
+    updated = state_store.load_config()
+
+    assert result["slug"] == "telegram-bots-suite"
+    assert result["managed_root_deleted"] is True
+    assert "telegram-bots-suite" not in updated.superprojects
+    assert not managed_root.exists()

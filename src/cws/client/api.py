@@ -99,3 +99,11 @@ class ApiClient:
             f"/api/superprojects/{slug}/threads/{thread_id}/checkpoint",
         )
         return ThreadCheckpoint.model_validate(response.json()["checkpoint"])
+
+    def delete_superproject(self, slug: str, *, force: bool = False) -> dict[str, Any]:
+        response = self._request(
+            "DELETE",
+            f"/api/superprojects/{slug}",
+            params={"force": str(force).lower()},
+        )
+        return response.json()

@@ -111,6 +111,8 @@ They install:
 - `cws shell`
 - `cws enroll-device`
 - `cws create-superproject`
+- `cws disconnect-superproject --superproject <slug>`
+- `cws delete-superproject-server --superproject <slug> [--force]`
 - `cws update-from-server --superproject <slug>`
 - `cws override-current-state --superproject <slug>`
 - `cws turn-on-sync --superproject <slug>`

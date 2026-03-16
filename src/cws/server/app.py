@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
 from cws.config import ServerPaths
 from cws.models import (
@@ -148,6 +148,20 @@ def create_app() -> FastAPI:
             return service.push_checkpoint(device_id, request)
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.delete("/api/superprojects/{slug}")
+    def delete_superproject(
+        slug: str,
+        force: bool = Query(False),
+        device_id: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> dict[str, object]:
+        try:
+            return service.delete_superproject(slug, requesting_device_id=device_id, force=force)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/superprojects/{slug}/threads/{thread_id}/checkpoint")
     def get_thread_checkpoint(

@@ -134,6 +134,20 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         client.refresh_thread(slug, thread_id)
         typer.echo("Thread refresh payload applied locally. Reopen the thread in VS Code.")
         return
+    if command == "disconnect-superproject":
+        slug = arg_value("--superproject")
+        typer.echo(json.dumps(client.disconnect_superproject(slug), indent=2))
+        return
+    if command == "delete-superproject-server":
+        slug = arg_value("--superproject")
+        force = "--force" in args
+        if not typer.confirm(
+            f"Delete superproject '{slug}' from the server and erase its server-side state?",
+            default=False,
+        ):
+            raise RuntimeError("Server deletion aborted by user.")
+        typer.echo(json.dumps(client.delete_superproject_from_server(slug, force=force), indent=2))
+        return
     if command == "turn-on-sync":
         slug = arg_value("--superproject")
         try:
@@ -191,6 +205,24 @@ def enroll_device() -> None:
 @app.command("create-superproject")
 def create_superproject() -> None:
     create_superproject_interactive(service())
+
+
+@app.command("disconnect-superproject")
+def disconnect_superproject(superproject: str = typer.Option(..., "--superproject")) -> None:
+    typer.echo(json.dumps(service().disconnect_superproject(superproject), indent=2))
+
+
+@app.command("delete-superproject-server")
+def delete_superproject_server(
+    superproject: str = typer.Option(..., "--superproject"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    if not typer.confirm(
+        f"Delete superproject '{superproject}' from the server and erase its server-side state?",
+        default=False,
+    ):
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(service().delete_superproject_from_server(superproject, force=force), indent=2))
 
 
 @app.command("update-from-server")

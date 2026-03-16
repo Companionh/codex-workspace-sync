@@ -36,6 +36,8 @@ class CWSShell:
                     "status",
                     "enroll-device",
                     "create-superproject",
+                    "disconnect-superproject --superproject <slug>",
+                    "delete-superproject-server --superproject <slug> [--force]",
                     "update-from-server --superproject <slug>",
                     "override-current-state --superproject <slug> [--thread <id>]",
                     "turn-on-sync --superproject <slug>",
@@ -67,10 +69,16 @@ class CWSShell:
 
             create_superproject_interactive(self.service)
             return
-        if command in {"update-from-server", "override-current-state", "turn-on-sync", "refresh-thread"}:
+        if command in {
+            "update-from-server",
+            "override-current-state",
+            "turn-on-sync",
+            "refresh-thread",
+            "disconnect-superproject",
+            "delete-superproject-server",
+        }:
             from cws.cli import run_shell_command
 
             run_shell_command(self.service, command, args)
             return
         typer.echo(f"Unknown command: {command}")
-

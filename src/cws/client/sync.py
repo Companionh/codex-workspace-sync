@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -590,3 +591,46 @@ class ClientService:
         config = self.config()
         config.superprojects[slug] = local_state
         self.save_config(config)
+
+    def disconnect_superproject(self, slug: str, *, wipe_managed_root: bool = True) -> dict[str, Any]:
+        config = self.config()
+        local_state = config.superprojects.get(slug)
+        if local_state is None:
+            raise KeyError(f"Unknown local superproject: {slug}")
+
+        if config.sync_active_superproject == slug:
+            self.turn_off_sync()
+            config = self.config()
+            local_state = config.superprojects.get(slug)
+            if local_state is None:
+                raise KeyError(f"Unknown local superproject: {slug}")
+
+        managed_root = Path(local_state.managed_root) if local_state.managed_root else None
+        managed_root_deleted = False
+        if wipe_managed_root and managed_root and managed_root.exists():
+            shutil.rmtree(managed_root, ignore_errors=False)
+            managed_root_deleted = True
+
+        quarantine_root = self.state_store.paths.cache_dir / "quarantine" / slug
+        if quarantine_root.exists():
+            shutil.rmtree(quarantine_root, ignore_errors=False)
+
+        queue = [item for item in self.state_store.load_queue() if item.superproject_slug != slug]
+        self.state_store.save_queue(queue)
+
+        del config.superprojects[slug]
+        if config.sync_active_superproject == slug:
+            config.sync_active_superproject = None
+        self.save_config(config)
+
+        return {
+            "slug": slug,
+            "managed_root_deleted": managed_root_deleted,
+            "managed_root": str(managed_root) if managed_root else None,
+        }
+
+    def delete_superproject_from_server(self, slug: str, *, force: bool = False) -> dict[str, Any]:
+        config = self.config()
+        if config.sync_active_superproject == slug:
+            self.turn_off_sync()
+        return self.api_client().delete_superproject(slug, force=force)

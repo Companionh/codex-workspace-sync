@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from string import Template
@@ -422,6 +423,32 @@ class ServerService:
             ],
             shared_skills=self._shared_skills(),
         )
+
+    def delete_superproject(self, slug: str, *, requesting_device_id: str, force: bool = False) -> dict[str, object]:
+        manifest = self.get_manifest(slug)
+        lease = self._load_lease()
+        if lease.device_id and lease.device_id != requesting_device_id and not force:
+            raise PermissionError(
+                f"Another device currently holds the active lease: {lease.device_id}"
+            )
+        if lease.device_id and (lease.device_id == requesting_device_id or force):
+            self.release_lease(lease.device_id, force=True)
+
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM checkpoints WHERE superproject_slug = ?", (slug,))
+            connection.execute("DELETE FROM mismatch_resolutions WHERE superproject_slug = ?", (slug,))
+            connection.execute("DELETE FROM backups WHERE superproject_slug = ?", (slug,))
+            connection.execute("DELETE FROM superprojects WHERE slug = ?", (slug,))
+            connection.commit()
+
+        root = self._superproject_root(slug)
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=False)
+        return {
+            "deleted": True,
+            "slug": slug,
+            "name": manifest.name,
+        }
 
     def get_thread_checkpoint(self, slug: str, thread_id: str) -> ThreadCheckpoint:
         checkpoint = self._latest_checkpoint(slug, thread_id)
