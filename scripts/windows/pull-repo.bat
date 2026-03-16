@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 set "CWS_PAUSE_ON_ERROR=1"
 set "CWS_PAUSE_ON_SUCCESS=1"
 
@@ -108,8 +108,8 @@ set "DO_REBASE="
 if /I "%REBASE_ON_DIVERGENCE%"=="true" set "DO_REBASE=1"
 if /I "%REBASE_ON_DIVERGENCE%"=="prompt" (
   set /p REBASE_CHOICE=Rebase local commits onto %GITHUB_REMOTE%/%GITHUB_BRANCH% now? [y/N]: 
-  if /I "%REBASE_CHOICE%"=="y" set "DO_REBASE=1"
-  if /I "%REBASE_CHOICE%"=="yes" set "DO_REBASE=1"
+  if /I "!REBASE_CHOICE!"=="y" set "DO_REBASE=1"
+  if /I "!REBASE_CHOICE!"=="yes" set "DO_REBASE=1"
 )
 
 if not defined DO_REBASE (
