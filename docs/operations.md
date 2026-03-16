@@ -24,11 +24,13 @@ The Windows operator experience is a simple command shell started by a batch fil
 
 Typical flow:
 
-1. run `update-from-server` or `override-current-state`
-2. run `turn-on-sync`
-3. let the shell heartbeat and sync in the background
-4. inspect `status` when changing devices
-5. run `turn-off-sync` manually if desired, or allow the server lease to expire automatically
+1. enroll the device if needed with `enroll-device`
+2. attach an existing server superproject with `attach-superproject`, or create a new one with `create-superproject`
+3. run `update-from-server` or `override-current-state`
+4. run `turn-on-sync`
+5. let the shell heartbeat and sync in the background
+6. inspect `status` when changing devices
+7. run `turn-off-sync` manually if desired, or allow the server lease to expire automatically
 
 For first-time device enrollment from Windows, use:
 
@@ -41,6 +43,9 @@ Prompt meanings during enrollment:
 - `Secondary passphrase`: the bootstrap passphrase set on the server with `cws-server init`
 - `SSH password`: the Linux account password, usually blank when SSH keys are used
 - `SSH key passphrase`: the passphrase that unlocks the local private key on Windows
+
+
+Enrollment only registers the device and stores its credentials. It does not automatically create local bindings for server-side superprojects. If `telegram-bots-suite` already exists on the server, run `attach-superproject` once on each new machine before using `update-from-server`.
 
 ## Publishing code from Windows
 

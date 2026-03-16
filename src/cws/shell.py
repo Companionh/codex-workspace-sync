@@ -27,7 +27,10 @@ class CWSShell:
             if raw == "help":
                 self._print_help()
                 continue
-            self._dispatch(raw)
+            try:
+                self._dispatch(raw)
+            except Exception as exc:
+                typer.echo(f"Command failed: {self._format_error(exc)}", err=True)
 
     def _print_help(self) -> None:
         typer.echo(
@@ -36,6 +39,7 @@ class CWSShell:
                     "status",
                     "enroll-device",
                     "create-superproject",
+                    "attach-superproject",
                     "disconnect-superproject --superproject <slug>",
                     "delete-superproject-server --superproject <slug> [--force]",
                     "update-from-server --superproject <slug>",
@@ -47,6 +51,12 @@ class CWSShell:
                 ]
             )
         )
+
+    @staticmethod
+    def _format_error(exc: Exception) -> str:
+        if isinstance(exc, KeyError) and exc.args:
+            return str(exc.args[0])
+        return str(exc)
 
     def _dispatch(self, raw: str) -> None:
         parts = shlex.split(raw)
@@ -68,6 +78,11 @@ class CWSShell:
             from cws.cli import create_superproject_interactive
 
             create_superproject_interactive(self.service)
+            return
+        if command == "attach-superproject":
+            from cws.cli import attach_superproject_interactive
+
+            attach_superproject_interactive(self.service)
             return
         if command in {
             "update-from-server",

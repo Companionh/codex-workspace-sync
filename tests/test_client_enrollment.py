@@ -288,3 +288,66 @@ def test_disconnect_superproject_wipes_local_managed_root(tmp_path) -> None:
     assert result["managed_root_deleted"] is True
     assert "telegram-bots-suite" not in updated.superprojects
     assert not managed_root.exists()
+
+
+
+def test_attach_superproject_registers_local_state_and_pulls_server_docs(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(ClientConfig())
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    server_state = PullStateResponse(
+        manifest=SuperprojectManifest(
+            slug="telegram-bots-suite",
+            name="Telegram Bots Suite",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            managed_files=[server_document.record],
+        ),
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=None,
+        pending_resolutions=[],
+    )
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    diff = service.attach_superproject(
+        "telegram-bots-suite",
+        managed_root=managed_root,
+        workspace_roots=[workspace_root],
+        assume_yes=True,
+    )
+    updated_state = state_store.load_config().superprojects["telegram-bots-suite"]
+
+    assert diff.new_on_server == ["baseline/base_rules.md"]
+    assert diff.new_local == []
+    assert diff.changed == []
+    assert updated_state.name == "Telegram Bots Suite"
+    assert updated_state.managed_root == str(managed_root)
+    assert updated_state.workspace_roots == [str(workspace_root)]
+    assert updated_state.last_alignment_action == AlignmentAction.UPDATE_FROM_SERVER
+    assert (managed_root / "baseline" / "base_rules.md").read_text(encoding="utf-8") == "# server\n"
+
+
+def test_update_from_server_reports_attach_hint_for_unknown_local_superproject(tmp_path) -> None:
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(ClientConfig())
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+
+    with pytest.raises(RuntimeError, match="attach-superproject or create-superproject first"):
+        service.update_from_server("telegram-bots-suite", assume_yes=True)

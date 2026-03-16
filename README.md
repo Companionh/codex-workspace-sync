@@ -45,6 +45,9 @@ If you want a Windows launcher that stays open after enrollment succeeds or fail
 
 That launcher runs against the repo's local `src` tree, forces a persistent `cmd` window, and writes logs under `%LOCALAPPDATA%\\CodexWorkspaceSync\\logs\\`.
 
+
+Enrollment registers the device with the server, but it does not automatically bind existing server superprojects into the local client config. If the server already has a superproject such as `telegram-bots-suite`, attach it locally before running `update-from-server`.
+
 During enrollment:
 
 - `Secondary passphrase` means the passphrase you set with `cws-server init` on Hetzner.
@@ -111,6 +114,7 @@ They install:
 - `cws shell`
 - `cws enroll-device`
 - `cws create-superproject`
+- `cws attach-superproject`
 - `cws disconnect-superproject --superproject <slug>`
 - `cws delete-superproject-server --superproject <slug> [--force]`
 - `cws update-from-server --superproject <slug>`

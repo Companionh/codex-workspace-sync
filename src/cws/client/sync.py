@@ -346,10 +346,37 @@ class ClientService:
         self.update_from_server(slug, assume_yes=True)
         return manifest.slug
 
+    def attach_superproject(
+        self,
+        slug: str,
+        *,
+        managed_root: Path,
+        workspace_roots: list[Path],
+        assume_yes: bool = True,
+    ) -> DiffSummary:
+        server_state = self.api_client().pull_state(slug)
+        config = self.config()
+        local_state = config.superprojects.get(slug)
+        if local_state is None:
+            local_state = ClientSuperprojectState(
+                slug=server_state.manifest.slug,
+                name=server_state.manifest.name,
+            )
+        local_state.slug = server_state.manifest.slug
+        local_state.name = server_state.manifest.name
+        local_state.managed_root = str(managed_root)
+        local_state.workspace_roots = [str(path) for path in workspace_roots]
+        config.superprojects[slug] = local_state
+        self.save_config(config)
+        managed_root.mkdir(parents=True, exist_ok=True)
+        return self.update_from_server(server_state.manifest.slug, assume_yes=assume_yes)
+
     def _get_superproject_state(self, slug: str) -> ClientSuperprojectState:
         config = self.config()
         if slug not in config.superprojects:
-            raise KeyError(f"Unknown local superproject: {slug}")
+            raise RuntimeError(
+                f"Unknown local superproject: {slug}. This device is enrolled, but that superproject is not attached locally yet. Use attach-superproject or create-superproject first."
+            )
         return config.superprojects[slug]
 
     def _write_shared_skills(self, artifacts: list[dict[str, Any]]) -> None:

@@ -107,6 +107,26 @@ def create_superproject_interactive(client: ClientService) -> None:
     typer.echo(f"Created superproject '{slug}'.")
 
 
+def attach_superproject_interactive(client: ClientService) -> None:
+    slug = typer.prompt("Existing superproject slug")
+    managed_root = Path(typer.prompt("Local managed docs root"))
+    workspace_roots: list[Path] = []
+    typer.echo("Enter workspace roots used for Codex session matching. Type 'done' when finished.")
+    while True:
+        value = typer.prompt("Workspace root", default="done")
+        if value.strip().lower() == "done":
+            break
+        workspace_roots.append(Path(value))
+    diff = client.attach_superproject(
+        slug,
+        managed_root=managed_root,
+        workspace_roots=workspace_roots,
+        assume_yes=True,
+    )
+    typer.echo(f"Attached local superproject '{slug}'.")
+    typer.echo(json.dumps(diff.__dict__, indent=2))
+
+
 def run_shell_command(client: ClientService, command: str, args: list[str]) -> None:
     def arg_value(name: str, *, required: bool = True) -> str | None:
         if name in args:
@@ -205,6 +225,11 @@ def enroll_device() -> None:
 @app.command("create-superproject")
 def create_superproject() -> None:
     create_superproject_interactive(service())
+
+
+@app.command("attach-superproject")
+def attach_superproject() -> None:
+    attach_superproject_interactive(service())
 
 
 @app.command("disconnect-superproject")
