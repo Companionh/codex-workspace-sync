@@ -17,6 +17,7 @@ rem set "AUTOSTASH=true"
 rem set "REFRESH_INSTALL=true"
 rem set "RUN_COMPILE_CHECK=true"
 rem set "REBASE_ON_DIVERGENCE=prompt"
+rem set "RESET_ON_DIVERGENCE=prompt"
 rem Optional: window behavior for the Windows batch helpers.
 rem set "CWS_PAUSE_ON_ERROR=1"
 rem set "CWS_PAUSE_ON_SUCCESS=1"

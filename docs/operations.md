@@ -48,7 +48,7 @@ Use `scripts/windows/pull-repo.bat` to pull the latest project code onto a Windo
 2. Reuse `scripts/windows/push-config.local.cmd` if you already have it.
 3. Run `scripts/windows/pull-repo.bat`.
 
-By default the helper fetches `origin`, fast-forwards the current branch, refreshes the editable Python install, and runs `compileall` over `src`, `tests`, and `tools`. If the repo has uncommitted changes, it autostashes them first and restores them after the update. If the local branch and remote branch diverge, it prompts before rebasing local commits onto the fetched remote branch. You can control that behavior with `REBASE_ON_DIVERGENCE` in `push-config.local.cmd`.
+By default the helper fetches `origin`, fast-forwards the current branch, refreshes the editable Python install, and runs `compileall` over `src`, `tests`, and `tools`. If the repo has uncommitted changes, it autostashes them first and restores them after the update. If the local branch and remote branch diverge, it prompts either to rebase local commits or to create a backup branch and sync the current branch to the fetched remote branch. You can control that behavior with `REBASE_ON_DIVERGENCE` and `RESET_ON_DIVERGENCE` in `push-config.local.cmd`.
 
 ## Updating code on Hetzner
 

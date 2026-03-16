@@ -16,6 +16,7 @@ if not defined AUTOSTASH set "AUTOSTASH=true"
 if not defined REFRESH_INSTALL set "REFRESH_INSTALL=true"
 if not defined RUN_COMPILE_CHECK set "RUN_COMPILE_CHECK=true"
 if not defined REBASE_ON_DIVERGENCE set "REBASE_ON_DIVERGENCE=prompt"
+if not defined RESET_ON_DIVERGENCE set "RESET_ON_DIVERGENCE=prompt"
 
 "%GIT_EXE%" --version >nul 2>nul
 if errorlevel 1 (
@@ -105,16 +106,47 @@ echo Local and remote branches have diverged.
 echo Local branch is ahead by %AHEAD_COUNT% commit^(s^) and behind by %BEHIND_COUNT% commit^(s^).
 
 set "DO_REBASE="
+set "DO_RESET="
 if /I "%REBASE_ON_DIVERGENCE%"=="true" set "DO_REBASE=1"
-if /I "%REBASE_ON_DIVERGENCE%"=="prompt" (
-  set /p REBASE_CHOICE=Rebase local commits onto %GITHUB_REMOTE%/%GITHUB_BRANCH% now? [y/N]: 
-  if /I "!REBASE_CHOICE!"=="y" set "DO_REBASE=1"
-  if /I "!REBASE_CHOICE!"=="yes" set "DO_REBASE=1"
+if /I "%RESET_ON_DIVERGENCE%"=="true" set "DO_RESET=1"
+
+if not defined DO_REBASE if not defined DO_RESET if /I "%REBASE_ON_DIVERGENCE%"=="prompt" (
+  echo Choose how to reconcile the divergence:
+  echo   [R] Rebase local commits onto %GITHUB_REMOTE%/%GITHUB_BRANCH%
+  echo   [S] Create a backup branch and sync this branch to %GITHUB_REMOTE%/%GITHUB_BRANCH%
+  echo   [A] Abort
+  set /p DIVERGENCE_CHOICE=Select R, S, or A [A]: 
+  if /I "!DIVERGENCE_CHOICE!"=="r" set "DO_REBASE=1"
+  if /I "!DIVERGENCE_CHOICE!"=="rebase" set "DO_REBASE=1"
+  if /I "!DIVERGENCE_CHOICE!"=="s" set "DO_RESET=1"
+  if /I "!DIVERGENCE_CHOICE!"=="sync" set "DO_RESET=1"
+  if /I "!DIVERGENCE_CHOICE!"=="reset" set "DO_RESET=1"
+)
+
+if defined DO_RESET (
+  for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-Date).ToUniversalTime().ToString(\"yyyyMMdd_HHmmss\")"') do set "BACKUP_STAMP=%%I"
+  if not defined BACKUP_STAMP set "BACKUP_STAMP=%RANDOM%%RANDOM%"
+  set "BACKUP_BRANCH=backup/pre_sync_%BACKUP_STAMP%"
+  echo Creating safety backup branch: !BACKUP_BRANCH!
+  "%GIT_EXE%" branch "!BACKUP_BRANCH!" HEAD
+  if errorlevel 1 (
+    echo Failed to create backup branch.
+    popd >nul
+    goto :error_exit
+  )
+  echo Resetting current branch to FETCH_HEAD...
+  "%GIT_EXE%" reset --hard FETCH_HEAD
+  if errorlevel 1 (
+    echo git reset --hard failed.
+    popd >nul
+    goto :error_exit
+  )
+  goto :post_update
 )
 
 if not defined DO_REBASE (
   echo Pull aborted to avoid rewriting local history unexpectedly.
-  echo Run push-repo.bat first, or rerun pull-repo.bat and choose rebase when prompted.
+  echo Run push-repo.bat first, or rerun pull-repo.bat and choose rebase or sync when prompted.
   popd >nul
   goto :error_exit
 )

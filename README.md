@@ -58,7 +58,7 @@ Use `scripts\\windows\\pull-repo.bat` to update this repo from GitHub on Windows
 
 - It fetches and fast-forwards the current checkout from `origin` by default.
 - It can autostash local changes before the update and restore them afterward.
-- If the local branch and remote branch diverge, it can prompt to rebase local commits onto the fetched remote branch.
+- If the local branch and remote branch diverge, it can prompt either to rebase local commits or to create a backup branch and sync the current branch to the fetched remote branch.
 - It can refresh the editable Python install and run a compile check after the pull.
 - It pauses at the end when launched by double-click so you can read the output.
 - It uses the same local config file as the push helper.
