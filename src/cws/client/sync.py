@@ -28,7 +28,7 @@ from cws.models import (
     SubprojectRecord,
     ThreadCheckpoint,
 )
-from cws.utils import atomic_write_text, decode_b64, dump_json_file, sha256_text, slugify, utc_now
+from cws.utils import atomic_write_bytes, atomic_write_text, decode_b64, dump_json_file, sha256_text, slugify, utc_now
 
 
 @dataclass
@@ -354,9 +354,15 @@ class ClientService:
     def _write_shared_skills(self, artifacts: list[dict[str, Any]]) -> None:
         target_root = self.codex_root / "skills" / "codex-workspace-sync-shared"
         for artifact in artifacts:
-            target_path = target_root / artifact["relative_path"]
+            if hasattr(artifact, "relative_path"):
+                relative_path = artifact.relative_path
+                content_b64 = artifact.content_b64
+            else:
+                relative_path = artifact["relative_path"]
+                content_b64 = artifact["content_b64"]
+            target_path = target_root / relative_path
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(decode_b64(artifact["content_b64"]))
+            target_path.write_bytes(decode_b64(content_b64))
 
     def compare_with_server(self, slug: str) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
@@ -411,18 +417,35 @@ class ClientService:
                 )
         local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
         local_state.last_aligned_revision = server_state.manifest.revision
-        local_documents, updated_ids = build_managed_documents(managed_root, local_state.managed_file_ids)
+        server_file_ids = {
+            document.record.relative_path: document.record.file_id
+            for document in server_state.managed_documents
+        }
+        local_documents, updated_ids = build_managed_documents(managed_root, server_file_ids)
         local_state.managed_file_ids = updated_ids
         config = self.config()
         config.superprojects[slug] = local_state
         self.save_config(config)
         return diff
 
+    @staticmethod
+    def _can_skip_locked_raw_artifact(relative_path: str) -> bool:
+        return (
+            relative_path == "session_index.jsonl"
+            or relative_path.startswith("sessions/")
+            or relative_path.endswith((".sqlite", ".sqlite-shm", ".sqlite-wal"))
+        )
+
     def _apply_raw_bundle(self, bundle) -> None:
         for artifact in bundle.files:
             target = self.codex_root / artifact.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(decode_b64(artifact.content_b64))
+            try:
+                atomic_write_bytes(target, decode_b64(artifact.content_b64))
+            except (OSError, PermissionError):
+                if self._can_skip_locked_raw_artifact(artifact.relative_path):
+                    continue
+                raise
 
     def build_checkpoint(self, slug: str, *, canonical: bool) -> ThreadCheckpoint:
         local_state = self._get_superproject_state(slug)

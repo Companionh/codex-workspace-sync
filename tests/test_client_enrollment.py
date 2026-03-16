@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from cws.client.state import ClientStateStore
 from cws.client.sync import ClientService
+from cws.config import ClientPaths
+from cws.models import (
+    AlignmentAction,
+    ClientConfig,
+    ClientSuperprojectState,
+    ManagedDocument,
+    ManagedFileClass,
+    ManagedFileRecord,
+    PullStateResponse,
+    RawFileArtifact,
+    RawSessionBundle,
+    SuperprojectManifest,
+)
+from cws.utils import encode_b64, utc_now
 
 
 class _FakeChannel:
@@ -125,3 +141,123 @@ def test_register_device_over_ssh_uses_identity_file_from_matching_hostname(monk
 
     assert _FakeSSHClient.last_connect_kwargs is not None
     assert _FakeSSHClient.last_connect_kwargs["key_filename"].endswith("id_ed25519_hetzner")
+
+
+def test_write_shared_skills_accepts_model_instances(tmp_path) -> None:
+    service = ClientService(codex_root=tmp_path / ".codex")
+    artifact = RawFileArtifact(
+        relative_path="workspace-sync-operator/SKILL.md",
+        sha256="unused",
+        content_b64=encode_b64(b"hello"),
+    )
+
+    service._write_shared_skills([artifact])
+
+    saved = tmp_path / ".codex" / "skills" / "codex-workspace-sync-shared" / "workspace-sync-operator" / "SKILL.md"
+    assert saved.read_text(encoding="utf-8") == "hello"
+
+
+class _FakeApiClient:
+    def __init__(self, state: PullStateResponse) -> None:
+        self._state = state
+
+    def pull_state(self, _slug: str) -> PullStateResponse:
+        return self._state
+
+
+def test_update_from_server_adopts_server_managed_file_ids(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    config = ClientConfig(
+        superprojects={
+            "telegram-bots-suite": ClientSuperprojectState(
+                slug="telegram-bots-suite",
+                name="telegram-bots-suite",
+                managed_root=str(managed_root),
+                managed_file_ids={"baseline/base_rules.md": "local-file-id"},
+                last_alignment_action=AlignmentAction.NONE,
+            )
+        }
+    )
+    state_store.save_config(config)
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    server_state = PullStateResponse(
+        manifest=SuperprojectManifest(
+            slug="telegram-bots-suite",
+            name="telegram-bots-suite",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            managed_files=[server_document.record],
+        ),
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=None,
+        pending_resolutions=[],
+    )
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    diff = service.update_from_server("telegram-bots-suite", assume_yes=True)
+    updated_config = state_store.load_config()
+    updated_state = updated_config.superprojects["telegram-bots-suite"]
+
+    assert diff.new_on_server == []
+    assert diff.new_local == []
+    assert diff.changed == ["baseline/base_rules.md"]
+    assert updated_state.managed_file_ids["baseline/base_rules.md"] == "server-file-id"
+    assert baseline_path.read_text(encoding="utf-8") == "# server\n"
+
+
+def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) -> None:
+    service = ClientService(codex_root=tmp_path / ".codex")
+    bundle = RawSessionBundle(
+        captured_at=utc_now(),
+        files=[
+            RawFileArtifact(
+                relative_path="session_index.jsonl",
+                sha256="index",
+                content_b64=encode_b64(b"index"),
+            ),
+            RawFileArtifact(
+                relative_path="state_5.sqlite-shm",
+                sha256="sidecar",
+                content_b64=encode_b64(b"volatile"),
+            ),
+            RawFileArtifact(
+                relative_path="sessions/2026/03/16/test-session.jsonl",
+                sha256="session",
+                content_b64=encode_b64(b"session"),
+            ),
+        ],
+    )
+
+    def fake_atomic_write_bytes(path, data):
+        if str(path).endswith(".sqlite-shm"):
+            raise OSError(22, "Invalid argument")
+        if str(path).endswith("test-session.jsonl"):
+            raise PermissionError(5, "Access is denied")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(data)
+
+    monkeypatch.setattr("cws.client.sync.atomic_write_bytes", fake_atomic_write_bytes)
+
+    service._apply_raw_bundle(bundle)
+
+    assert (tmp_path / ".codex" / "session_index.jsonl").read_text(encoding="utf-8") == "index"
+    assert not (tmp_path / ".codex" / "state_5.sqlite-shm").exists()
+    assert not (tmp_path / ".codex" / "sessions" / "2026" / "03" / "16" / "test-session.jsonl").exists()
