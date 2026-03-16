@@ -3,6 +3,7 @@ setlocal EnableExtensions
 set "GIT_TERMINAL_PROMPT=0"
 set "GCM_INTERACTIVE=never"
 set "GCM_PRESERVE_CREDS=0"
+set "CWS_PAUSE_ON_ERROR=1"
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "REPO_ROOT=%%~fI"
@@ -21,19 +22,19 @@ if not defined GITHUB_BRANCH set "GITHUB_BRANCH=main"
 if errorlevel 1 (
   echo Git is not installed or not configured correctly.
   echo Set GIT_EXE in push-config.local.cmd or install Git for Windows.
-  exit /b 1
+  goto :error_exit
 )
 
 "%PYTHON_EXE%" --version >nul 2>nul
 if errorlevel 1 (
   echo Python is not installed or not configured correctly.
   echo Set PYTHON_EXE in push-config.local.cmd if needed.
-  exit /b 1
+  goto :error_exit
 )
 
 if not exist "%EXPORT_TOOL%" (
   echo Missing export tool: "%EXPORT_TOOL%"
-  exit /b 1
+  goto :error_exit
 )
 
 pushd "%REPO_ROOT%" >nul
@@ -51,7 +52,7 @@ for /f "delims=" %%I in ('powershell -NoProfile -Command "[Convert]::ToBase64Str
 if not defined AUTH_B64 (
   echo Failed to prepare GitHub authorization header.
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 
 if not exist "%PUBLISH_CHECKOUT%\.git" (
@@ -61,7 +62,7 @@ if not exist "%PUBLISH_CHECKOUT%\.git" (
   if errorlevel 1 (
     echo git clone failed.
     popd >nul
-    exit /b 1
+    goto :error_exit
   )
 )
 
@@ -77,7 +78,7 @@ if errorlevel 1 (
   echo git checkout failed in publish checkout.
   popd >nul
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 popd >nul
 
@@ -86,7 +87,7 @@ echo Exporting curated project tree into publish checkout...
 if errorlevel 1 (
   echo Export failed.
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 
 pushd "%PUBLISH_CHECKOUT%" >nul
@@ -97,7 +98,7 @@ if errorlevel 1 (
   echo git status failed.
   popd >nul
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 
 "%GIT_EXE%" add -A
@@ -105,7 +106,7 @@ if errorlevel 1 (
   echo git add failed.
   popd >nul
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 
 "%GIT_EXE%" diff --cached --quiet
@@ -114,7 +115,7 @@ if not errorlevel 1 (
   echo No staged changes to commit.
   popd >nul
   popd >nul
-  exit /b 0
+  goto :success_exit
 )
 
 set "COMMIT_MSG=%~1"
@@ -128,7 +129,7 @@ if "%COMMIT_MSG%"=="" (
   echo Commit cancelled.
   popd >nul
   popd >nul
-  exit /b 0
+  goto :success_exit
 )
 
 echo.
@@ -138,7 +139,7 @@ if errorlevel 1 (
   echo git commit failed.
   popd >nul
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 
 echo.
@@ -148,7 +149,7 @@ if errorlevel 1 (
   echo git push failed.
   popd >nul
   popd >nul
-  exit /b 1
+  goto :error_exit
 )
 
 echo.
@@ -157,5 +158,13 @@ echo Push successful. Latest commit:
 
 popd >nul
 popd >nul
+goto :success_exit
+
+:error_exit
+if "%CWS_PAUSE_ON_ERROR%"=="1" pause
+endlocal
+exit /b 1
+
+:success_exit
 endlocal
 exit /b 0
