@@ -56,3 +56,7 @@ def serve(
     port: int = typer.Option(8787),
 ) -> None:
     uvicorn.run("cws.server.app:app", host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    app()

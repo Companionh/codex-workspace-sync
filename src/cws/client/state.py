@@ -49,6 +49,12 @@ class ClientStateStore:
     def get_ssh_password(self) -> str | None:
         return self.secret_store.get("ssh-password")
 
+    def set_ssh_key_passphrase(self, value: str) -> None:
+        self.secret_store.set("ssh-key-passphrase", value)
+
+    def get_ssh_key_passphrase(self) -> str | None:
+        return self.secret_store.get("ssh-key-passphrase")
+
     def set_secondary_passphrase(self, value: str) -> None:
         self.secret_store.set("secondary-passphrase", value)
 
@@ -61,4 +67,3 @@ class ClientStateStore:
             config.superprojects[slug] = ClientSuperprojectState(slug=slug, name=name)
             self.save_config(config)
         return config.superprojects[slug]
-

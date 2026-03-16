@@ -45,6 +45,12 @@ If you want a Windows launcher that stays open after enrollment succeeds or fail
 
 That launcher runs against the repo's local `src` tree, forces a persistent `cmd` window, and writes logs under `%LOCALAPPDATA%\\CodexWorkspaceSync\\logs\\`.
 
+During enrollment:
+
+- `Secondary passphrase` means the passphrase you set with `cws-server init` on Hetzner.
+- `SSH password` means the Linux account password and can be left blank for key-based SSH.
+- `SSH key passphrase` means the passphrase that unlocks your local private key.
+
 ## Windows repo push helper
 
 Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.

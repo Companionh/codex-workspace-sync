@@ -25,7 +25,7 @@ from cws.server.service import ServerService
 @lru_cache(maxsize=1)
 def get_service() -> ServerService:
     repo_root = Path(__file__).resolve().parents[3]
-    return ServerService(paths=ServerPaths.default(app_root=repo_root, state_root=repo_root / "state"))
+    return ServerService(paths=ServerPaths.default(app_root=repo_root))
 
 
 def authenticate(

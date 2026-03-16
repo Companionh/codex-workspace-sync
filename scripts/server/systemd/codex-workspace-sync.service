@@ -8,9 +8,10 @@ WorkingDirectory=__ROOT__
 Environment=PYTHONUNBUFFERED=1
 Environment=CWS_APP_ROOT=__ROOT__
 Environment=CWS_STATE_ROOT=__STATE_ROOT__
+Environment=PYTHON_BIN=__PYTHON__
 Environment=PORT=__PORT__
 EnvironmentFile=-/etc/codex-workspace-sync/service.env
-ExecStart=__PYTHON__ -m cws.server.bootstrap serve --host 0.0.0.0 --port __PORT__
+ExecStart=__ROOT__/scripts/server/run-server.sh
 Restart=always
 RestartSec=5
 User=__USER__

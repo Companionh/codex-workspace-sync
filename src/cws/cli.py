@@ -37,15 +37,25 @@ def append_enrollment_log(message: str) -> None:
 def enroll_device_interactive(client: ClientService) -> None:
     append_enrollment_log("Starting interactive device enrollment.")
     server_url = typer.prompt("Server URL", default="http://127.0.0.1:8787")
-    ssh_host = typer.prompt("SSH host")
+    ssh_host = typer.prompt("SSH host (hostname/IP only is best; pasted ssh targets are accepted)")
     ssh_user = typer.prompt("SSH user")
     ssh_port = int(typer.prompt("SSH port", default="22"))
+    ssh_host, ssh_user, ssh_port = client.normalize_ssh_target(ssh_host, ssh_user, ssh_port)
+    typer.echo(f"Using SSH target: {ssh_user}@{ssh_host}:{ssh_port}")
+    append_enrollment_log(f"Normalized SSH target to {ssh_user}@{ssh_host}:{ssh_port}")
     device_name = typer.prompt("Device name")
     typer.echo("Secondary passphrase = the passphrase you set when you ran `cws-server init` on Hetzner.")
     secondary_passphrase = typer.prompt("Secondary passphrase", hide_input=True)
     typer.echo("SSH password = your Linux account password. Leave it blank if you log in with an SSH key.")
     ssh_password = typer.prompt(
         "SSH password (leave blank for SSH key login)",
+        hide_input=True,
+        default="",
+        show_default=False,
+    ) or None
+    typer.echo("SSH key passphrase = the passphrase that unlocks your local private key. Leave it blank if your key has no passphrase or your ssh-agent already has it loaded.")
+    ssh_key_passphrase = typer.prompt(
+        "SSH key passphrase (optional)",
         hide_input=True,
         default="",
         show_default=False,
@@ -65,6 +75,7 @@ def enroll_device_interactive(client: ClientService) -> None:
         device_name=device_name,
         secondary_passphrase=secondary_passphrase,
         ssh_password=ssh_password,
+        ssh_key_passphrase=ssh_key_passphrase,
         github_pat=github_pat,
     )
     typer.echo(json.dumps(response, indent=2))

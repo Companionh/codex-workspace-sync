@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import paramiko
@@ -124,8 +125,10 @@ class ClientService:
         device_name: str,
         secondary_passphrase: str,
         ssh_password: str | None = None,
+        ssh_key_passphrase: str | None = None,
         github_pat: str | None = None,
     ) -> dict[str, Any]:
+        ssh_host, ssh_user, ssh_port = self.normalize_ssh_target(ssh_host, ssh_user, ssh_port)
         metadata = {
             "platform": "windows",
             "enrolled_at": utc_now().isoformat(),
@@ -138,6 +141,7 @@ class ClientService:
             secondary_passphrase=secondary_passphrase,
             metadata=metadata,
             ssh_password=ssh_password,
+            ssh_key_passphrase=ssh_key_passphrase,
         )
         config = self.config()
         config.server_url = server_url.rstrip("/")
@@ -151,9 +155,80 @@ class ClientService:
         self.state_store.set_secondary_passphrase(secondary_passphrase)
         if ssh_password:
             self.state_store.set_ssh_password(ssh_password)
+        if ssh_key_passphrase:
+            self.state_store.set_ssh_key_passphrase(ssh_key_passphrase)
         if github_pat:
             self.state_store.set_github_token(github_pat)
         return response
+
+    @staticmethod
+    def normalize_ssh_target(ssh_host: str, ssh_user: str, ssh_port: int) -> tuple[str, str, int]:
+        raw_host = ssh_host.strip()
+        normalized_user = ssh_user.strip()
+        normalized_port = ssh_port
+
+        if raw_host.lower().startswith("ssh "):
+            raw_host = raw_host[4:].strip()
+
+        normalized_host = raw_host
+        if "://" in raw_host:
+            parsed = urlsplit(raw_host)
+            normalized_host = parsed.hostname or raw_host
+            if parsed.username and not normalized_user:
+                normalized_user = parsed.username
+            if parsed.scheme == "ssh" and parsed.port:
+                normalized_port = parsed.port
+        else:
+            if "@" in raw_host:
+                maybe_user, maybe_host = raw_host.split("@", 1)
+                if maybe_user and not normalized_user:
+                    normalized_user = maybe_user
+                normalized_host = maybe_host
+            if normalized_host.count(":") == 1:
+                host_part, port_part = normalized_host.rsplit(":", 1)
+                if host_part and port_part.isdigit():
+                    normalized_host = host_part
+                    normalized_port = int(port_part)
+
+        return normalized_host.strip(), normalized_user, normalized_port
+
+    @staticmethod
+    def resolve_ssh_config(ssh_host: str) -> dict[str, str]:
+        config_path = Path.home() / ".ssh" / "config"
+        if not config_path.exists():
+            return {}
+
+        ssh_config = paramiko.SSHConfig()
+        with config_path.open("r", encoding="utf-8") as handle:
+            ssh_config.parse(handle)
+        resolved = ssh_config.lookup(ssh_host)
+        if resolved.get("identityfile"):
+            return resolved
+
+        current_patterns: list[str] = []
+        current_values: dict[str, str] = {}
+        with config_path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                key, value = parts[0].lower(), parts[1].strip()
+                if key == "host":
+                    if current_values.get("hostname") == ssh_host and current_values.get("identityfile"):
+                        return current_values
+                    current_patterns = value.split()
+                    current_values = {"host": " ".join(current_patterns)}
+                    continue
+                if not current_patterns:
+                    continue
+                current_values[key] = value
+
+        if current_values.get("hostname") == ssh_host and current_values.get("identityfile"):
+            return current_values
+        return {}
 
     def _register_device_over_ssh(
         self,
@@ -165,27 +240,48 @@ class ClientService:
         secondary_passphrase: str,
         metadata: dict[str, Any],
         ssh_password: str | None,
+        ssh_key_passphrase: str | None,
     ) -> dict[str, Any]:
+        ssh_config = self.resolve_ssh_config(ssh_host)
+        key_filename = ssh_config.get("identityfile")
+        resolved_user = ssh_config.get("user", ssh_user) or ssh_user
+        resolved_port = int(ssh_config.get("port", ssh_port) or ssh_port)
+        if key_filename:
+            key_filename = str(Path(key_filename).expanduser())
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(
             hostname=ssh_host,
-            username=ssh_user,
-            port=ssh_port,
+            username=resolved_user,
+            port=resolved_port,
             password=ssh_password,
+            key_filename=key_filename,
+            passphrase=ssh_key_passphrase,
             timeout=20.0,
         )
         remote_script = (
             'APP_ROOT="${CWS_APP_ROOT:-/opt/codex-workspace-sync/app}"; '
+            'STATE_ROOT="${CWS_STATE_ROOT:-/opt/codex-workspace-sync/state}"; '
             'if [ -x "$APP_ROOT/.venv/bin/python" ]; then '
             '  PY_BIN="$APP_ROOT/.venv/bin/python"; '
             "else "
             '  PY_BIN="python3"; '
             "fi; "
-            '"$PY_BIN" -m cws.server.bootstrap register-device '
+            'if [ -x "$APP_ROOT/.venv/bin/cws-server" ]; then '
+            '  "$APP_ROOT/.venv/bin/cws-server" register-device '
+            '--app-root "$APP_ROOT" '
+            '--state-root "$STATE_ROOT" '
             f"--device-name {shlex.quote(device_name)} "
             f"--secondary-passphrase {shlex.quote(secondary_passphrase)} "
-            f"--metadata-json {shlex.quote(json.dumps(metadata))}"
+            f"--metadata-json {shlex.quote(json.dumps(metadata))}; "
+            "else "
+            '  "$PY_BIN" -m cws.server.bootstrap register-device '
+            '--app-root "$APP_ROOT" '
+            '--state-root "$STATE_ROOT" '
+            f"--device-name {shlex.quote(device_name)} "
+            f"--secondary-passphrase {shlex.quote(secondary_passphrase)} "
+            f"--metadata-json {shlex.quote(json.dumps(metadata))}; "
+            "fi"
         )
         command = f"bash -lc {shlex.quote(remote_script)}"
         _, stdout, stderr = client.exec_command(command)
@@ -195,6 +291,8 @@ class ClientService:
         client.close()
         if exit_code != 0:
             raise RuntimeError(error_output or output or "SSH enrollment failed.")
+        if not output.strip():
+            raise RuntimeError("SSH enrollment did not return a device payload.")
         return json.loads(output)
 
     def status(self) -> dict[str, Any]:

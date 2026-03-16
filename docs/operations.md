@@ -36,6 +36,12 @@ For first-time device enrollment from Windows, use:
 
 That launcher forces a persistent `cmd` window so the operator can read any enrollment error output. It also writes logs under `%LOCALAPPDATA%\CodexWorkspaceSync\logs\`.
 
+Prompt meanings during enrollment:
+
+- `Secondary passphrase`: the bootstrap passphrase set on the server with `cws-server init`
+- `SSH password`: the Linux account password, usually blank when SSH keys are used
+- `SSH key passphrase`: the passphrase that unlocks the local private key on Windows
+
 ## Publishing code from Windows
 
 `codex-workspace-sync` uses the same safe publish pattern as `telegram-scraper-bot`.
