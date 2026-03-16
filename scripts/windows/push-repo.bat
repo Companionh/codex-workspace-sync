@@ -1,8 +1,5 @@
 @echo off
 setlocal EnableExtensions
-set "GIT_TERMINAL_PROMPT=0"
-set "GCM_INTERACTIVE=never"
-set "GCM_PRESERVE_CREDS=0"
 set "CWS_PAUSE_ON_ERROR=1"
 
 set "SCRIPT_DIR=%~dp0"
@@ -44,24 +41,28 @@ if not defined GITHUB_REPO_URL (
 )
 
 if not defined GITHUB_REPO_URL set /p GITHUB_REPO_URL=GitHub repo URL:
-if not defined GITHUB_USERNAME set /p GITHUB_USERNAME=GitHub username:
-if not defined GITHUB_PAT set /p GITHUB_PAT=GitHub fine-grained token:
-
-set "AUTH_REPO_URL=%GITHUB_REPO_URL%"
-if defined GITHUB_USERNAME if defined GITHUB_PAT if /I "%GITHUB_REPO_URL:~0,19%"=="https://github.com/" (
-  set "AUTH_REPO_URL=%GITHUB_REPO_URL:https://=https://%GITHUB_USERNAME%:%GITHUB_PAT%@%"
+set "PUBLISH_REPO_URL=%GITHUB_REPO_URL%"
+if /I not "%GITHUB_REPO_URL%"=="%GITHUB_REPO_URL:https://github.com/=git@github.com:%" (
+  set "PUBLISH_REPO_URL=%GITHUB_REPO_URL:https://github.com/=git@github.com:%"
 )
 
-if "%AUTH_REPO_URL%"=="%GITHUB_REPO_URL%" (
-  echo Failed to prepare authenticated GitHub repo URL.
-  popd >nul
-  goto :error_exit
+if not defined GIT_USER_NAME (
+  for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" config --get user.name 2^>nul') do set "GIT_USER_NAME=%%I"
+)
+if not defined GIT_USER_EMAIL (
+  for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" config --get user.email 2^>nul') do set "GIT_USER_EMAIL=%%I"
+)
+if not defined GIT_USER_NAME (
+  for /f "delims=" %%I in ('"%GIT_EXE%" config --global --get user.name 2^>nul') do set "GIT_USER_NAME=%%I"
+)
+if not defined GIT_USER_EMAIL (
+  for /f "delims=" %%I in ('"%GIT_EXE%" config --global --get user.email 2^>nul') do set "GIT_USER_EMAIL=%%I"
 )
 
 if not exist "%PUBLISH_CHECKOUT%\.git" (
   echo Local publish checkout missing. Cloning into:
   echo   %PUBLISH_CHECKOUT%
-  "%GIT_EXE%" -c credential.helper= -c credential.interactive=never clone "%AUTH_REPO_URL%" "%PUBLISH_CHECKOUT%"
+  "%GIT_EXE%" clone "%PUBLISH_REPO_URL%" "%PUBLISH_CHECKOUT%"
   if errorlevel 1 (
     echo git clone failed.
     popd >nul
@@ -70,8 +71,9 @@ if not exist "%PUBLISH_CHECKOUT%\.git" (
 )
 
 pushd "%PUBLISH_CHECKOUT%" >nul
-"%GIT_EXE%" remote set-url origin "%GITHUB_REPO_URL%" >nul 2>nul
-"%GIT_EXE%" -c credential.helper= -c credential.interactive=never fetch "%AUTH_REPO_URL%" "%GITHUB_BRANCH%" >nul 2>nul
+"%GIT_EXE%" remote set-url origin "%PUBLISH_REPO_URL%" >nul 2>nul
+"%GIT_EXE%" remote set-url --push origin "%PUBLISH_REPO_URL%" >nul 2>nul
+"%GIT_EXE%" fetch origin "%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 (
   "%GIT_EXE%" checkout -B "%GITHUB_BRANCH%"
 ) else (
@@ -83,6 +85,8 @@ if errorlevel 1 (
   popd >nul
   goto :error_exit
 )
+if defined GIT_USER_NAME "%GIT_EXE%" config user.name "%GIT_USER_NAME%"
+if defined GIT_USER_EMAIL "%GIT_EXE%" config user.email "%GIT_USER_EMAIL%"
 popd >nul
 
 echo Exporting curated project tree into publish checkout...
@@ -137,6 +141,22 @@ if "%COMMIT_MSG%"=="" (
 
 echo.
 echo Committing...
+if not defined GIT_USER_NAME (
+  echo Git user.name is not configured for the publish checkout.
+  echo Set it in push-config.local.cmd as GIT_USER_NAME, or run:
+  echo   git config --global user.name "Your Name"
+  popd >nul
+  popd >nul
+  goto :error_exit
+)
+if not defined GIT_USER_EMAIL (
+  echo Git user.email is not configured for the publish checkout.
+  echo Set it in push-config.local.cmd as GIT_USER_EMAIL, or run:
+  echo   git config --global user.email "you@example.com"
+  popd >nul
+  popd >nul
+  goto :error_exit
+)
 "%GIT_EXE%" commit -m "%COMMIT_MSG%"
 if errorlevel 1 (
   echo git commit failed.
@@ -147,7 +167,7 @@ if errorlevel 1 (
 
 echo.
 echo Pushing to origin %GITHUB_BRANCH%...
-"%GIT_EXE%" -c credential.helper= -c credential.interactive=never push "%AUTH_REPO_URL%" "%GITHUB_BRANCH%"
+"%GIT_EXE%" push origin "%GITHUB_BRANCH%"
 if errorlevel 1 (
   echo git push failed.
   popd >nul

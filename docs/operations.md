@@ -35,10 +35,10 @@ Typical flow:
 `codex-workspace-sync` uses the same safe publish pattern as `telegram-scraper-bot`.
 
 1. Copy `scripts/windows/push-config.example.cmd` to `scripts/windows/push-config.local.cmd`.
-2. Fill in the repo URL, branch, username, token, and optional temp checkout path.
+2. Fill in the repo URL, branch, and optional temp checkout path.
 3. Run `scripts/windows/push-repo.bat`.
 
-The script exports only the tracked project tree needed for GitHub publishing into a temp checkout under `backups/push_tmp_repo`, then commits and pushes from there. Local runtime state, secrets, caches, and server backups are excluded from the export.
+The script exports only the tracked project tree needed for GitHub publishing into a temp checkout under `backups/push_tmp_repo`, then commits and pushes from there. Local runtime state, secrets, caches, and server backups are excluded from the export. Git authentication should already be configured on the Windows machine, ideally through SSH. The helper copies `user.name` and `user.email` from the main repo checkout when available, and you can override them in `push-config.local.cmd` with `GIT_USER_NAME` and `GIT_USER_EMAIL`.
 
 ## Updating code on Hetzner
 

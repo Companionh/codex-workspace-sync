@@ -45,10 +45,11 @@ Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.
 
 - It mirrors the `telegram-scraper-bot` workflow instead of pushing from the live checkout.
 - It exports a curated project tree into `backups\\push_tmp_repo`, commits there, and pushes from that temp checkout.
-- If `scripts\\windows\\push-config.local.cmd` exists, it loads your repo URL, branch, username, token, and temp-checkout path from there.
-- The temp checkout keeps `origin` on the clean GitHub URL, so the token is not written into the remote config.
-- It bypasses Git Credential Manager browser sign-in and uses a direct GitHub auth header for clone, fetch, and push.
-- The local config file is ignored by Git so your token stays out of the repo history.
+- If `scripts\\windows\\push-config.local.cmd` exists, it loads your repo URL, branch, and temp-checkout path from there.
+- It assumes Git authentication is already configured on the machine, preferably with SSH.
+- The temp checkout keeps `origin` on the normal repo URL and uses plain `git clone`, `git fetch`, and `git push`.
+- It copies `user.name` and `user.email` from your main checkout into the temp publish checkout when available.
+- The local config file is ignored by Git.
 
 ## Hetzner repo update helper
 
