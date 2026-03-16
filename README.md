@@ -83,6 +83,12 @@ Use `scripts/server/update_from_github.sh` on the server-side app checkout to fa
 - The script creates a pre-update backup of live sync state before pulling.
 - It can autostash temporary code changes, reinstall the editable package, and optionally restart a service unit after updating.
 
+If you install the server helper, you also get a single-command launcher:
+
+- `update-codex-workspace`
+
+That wrapper loads the server auth file, autostashes checkout changes, fast-forwards from GitHub, refreshes the package install, runs compile checks, reloads `systemd`, and restarts `codex-workspace-sync.service`. The older command name `update-codex-workspace-sync` remains as a compatibility alias.
+
 ## Hetzner service install helpers
 
 Use these scripts to fit the project into the same `/opt` + `/etc` + `systemd` pattern as the sibling bots:
@@ -97,7 +103,7 @@ Use these scripts to fit the project into the same `/opt` + `/etc` + `systemd` p
 They install:
 
 - a persistent API service: `codex-workspace-sync.service`
-- a one-command updater: `update-codex-workspace-sync`
+- a one-command updater: `update-codex-workspace`
 - an optional hourly update timer
 
 ## Key commands

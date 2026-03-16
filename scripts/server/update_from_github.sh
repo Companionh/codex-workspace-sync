@@ -64,6 +64,18 @@ if [[ -f "$AUTH_FILE" ]]; then
 fi
 
 git_fetch_source="${GITHUB_REPO_URL:-origin}"
+STASHED_LOCAL_CHANGES="false"
+STASH_LABEL=""
+
+cleanup() {
+  local status=$?
+  if [[ "$status" -ne 0 && "$STASHED_LOCAL_CHANGES" == "true" ]]; then
+    echo "Update did not complete. Local changes are still stored in the most recent git stash entry: $STASH_LABEL" >&2
+  fi
+  exit "$status"
+}
+
+trap cleanup EXIT
 
 run_git() {
   if [[ -n "${GITHUB_USERNAME:-}" && -n "${GITHUB_TOKEN:-}" ]]; then
@@ -106,14 +118,14 @@ BACKUP_DIR="$ROOT/server_backups/pre_update_$(date -u +%Y%m%d_%H%M%S)"
 echo "Creating pre-update live-state backup"
 /usr/bin/env bash "$ROOT/scripts/server/backup_live_state.sh" "$ROOT" "$STATE_ROOT" "$BACKUP_DIR"
 
-STASHED_LOCAL_CHANGES="false"
 if has_local_changes; then
   git -C "$ROOT" status --short > "$BACKUP_DIR/git_status_before_update.txt"
   git -C "$ROOT" diff > "$BACKUP_DIR/local_changes.patch" || true
   git -C "$ROOT" diff --cached > "$BACKUP_DIR/local_changes_staged.patch" || true
   if [[ "$AUTOSTASH" == "true" ]]; then
     echo "Local checkout changes detected. Autostashing before merge."
-    git -C "$ROOT" stash push --include-untracked -m "codex-workspace-sync pre-update autostash $(date -u +%Y%m%d_%H%M%S)"
+    STASH_LABEL="codex-workspace-sync pre-update autostash $(date -u +%Y%m%d_%H%M%S)"
+    git -C "$ROOT" stash push --include-untracked -m "$STASH_LABEL"
     STASHED_LOCAL_CHANGES="true"
   else
     echo "Local checkout changes detected and --no-autostash was set." >&2
@@ -137,6 +149,8 @@ echo "Running syntax checks"
 "$PYTHON_BIN" -m compileall "$ROOT/src" "$ROOT/tests" "$ROOT/tools"
 
 if [[ "$RESTART_AFTER" == "true" ]]; then
+  echo "Reloading systemd units"
+  systemctl daemon-reload
   echo "Restarting service unit: $RESTART_UNIT"
   systemctl restart "$RESTART_UNIT"
 fi

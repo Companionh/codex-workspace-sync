@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_ARG=""
-TARGET_BIN="/usr/local/bin/update-codex-workspace-sync"
+TARGET_BIN="/usr/local/bin/update-codex-workspace"
+LEGACY_TARGET_BIN="/usr/local/bin/update-codex-workspace-sync"
 DEFAULT_BRANCH="main"
 PYTHON_ARG=""
 AUTH_FILE_ARG="/etc/codex-workspace-sync/github.env"
@@ -17,6 +18,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --target)
       TARGET_BIN="$2"
+      shift 2
+      ;;
+    --legacy-target)
+      LEGACY_TARGET_BIN="$2"
       shift 2
       ;;
     --branch)
@@ -41,7 +46,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--root /opt/codex-workspace-sync/app] [--target /usr/local/bin/update-codex-workspace-sync] [--branch main] [--python /path/to/python] [--auth-file /etc/codex-workspace-sync/github.env] [--state-root /opt/codex-workspace-sync/state] [--restart-unit codex-workspace-sync.service]" >&2
+      echo "Usage: $0 [--root /opt/codex-workspace-sync/app] [--target /usr/local/bin/update-codex-workspace] [--legacy-target /usr/local/bin/update-codex-workspace-sync] [--branch main] [--python /path/to/python] [--auth-file /etc/codex-workspace-sync/github.env] [--state-root /opt/codex-workspace-sync/state] [--restart-unit codex-workspace-sync.service]" >&2
       exit 1
       ;;
   esac
@@ -75,5 +80,11 @@ exec /usr/bin/env bash "$ROOT_ARG/scripts/server/update_from_github.sh" --branch
 EOF
 
 sudo install -m 0755 "$tmpfile" "$TARGET_BIN"
+if [[ -n "$LEGACY_TARGET_BIN" && "$LEGACY_TARGET_BIN" != "$TARGET_BIN" ]]; then
+  sudo ln -sfn "$TARGET_BIN" "$LEGACY_TARGET_BIN"
+fi
 echo "Installed update command: $TARGET_BIN"
+if [[ -n "$LEGACY_TARGET_BIN" && "$LEGACY_TARGET_BIN" != "$TARGET_BIN" ]]; then
+  echo "Installed compatibility alias: $LEGACY_TARGET_BIN -> $TARGET_BIN"
+fi
 echo "It runs: $ROOT_ARG/scripts/server/update_from_github.sh --branch $DEFAULT_BRANCH --python $PYTHON_ARG --auth-file $AUTH_FILE_ARG --state-root $STATE_ROOT_ARG --restart --restart-unit $RESTART_UNIT_ARG"

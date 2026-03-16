@@ -68,7 +68,15 @@ By default the helper fetches `origin`, fast-forwards the current branch, refres
 2. Fill in the GitHub username, fine-grained token, and repo URL.
 3. Run `scripts/server/update_from_github.sh`.
 
-The updater creates a pre-update backup of the live sync state, fast-forwards the checkout, refreshes the editable Python install, and runs a compile check. Use `--restart` with `--restart-unit <unit>` if you also want it to restart a service after the update.
+The updater creates a pre-update backup of the live sync state, autostashes checkout changes, fast-forwards the checkout, refreshes the editable Python install, runs a compile check, reloads `systemd`, and can restart a service after the update.
+
+For the normal server workflow, install the one-command wrapper and just run:
+
+```bash
+update-codex-workspace
+```
+
+That installed launcher also keeps `update-codex-workspace-sync` available as a compatibility alias.
 
 ## Installing the Hetzner service
 
