@@ -134,7 +134,7 @@ echo "Refreshing Python package install"
 "$PYTHON_BIN" -m pip install -e "$ROOT"
 
 echo "Running syntax checks"
-"$PYTHON_BIN" -m compileall "$ROOT/src" "$ROOT/tests"
+"$PYTHON_BIN" -m compileall "$ROOT/src" "$ROOT/tests" "$ROOT/tools"
 
 if [[ "$RESTART_AFTER" == "true" ]]; then
   echo "Restarting service unit: $RESTART_UNIT"

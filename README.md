@@ -71,6 +71,23 @@ Use `scripts/server/update_from_github.sh` on the server-side app checkout to fa
 - The script creates a pre-update backup of live sync state before pulling.
 - It can autostash temporary code changes, reinstall the editable package, and optionally restart a service unit after updating.
 
+## Hetzner service install helpers
+
+Use these scripts to fit the project into the same `/opt` + `/etc` + `systemd` pattern as the sibling bots:
+
+- `scripts/server/install_systemd.sh`
+- `scripts/server/install_update_command.sh`
+- `scripts/server/systemd/codex-workspace-sync.service`
+- `scripts/server/systemd/codex-workspace-sync-update.service`
+- `scripts/server/systemd/codex-workspace-sync-update.timer`
+- `scripts/server/service.env.template`
+
+They install:
+
+- a persistent API service: `codex-workspace-sync.service`
+- a one-command updater: `update-codex-workspace-sync`
+- an optional hourly update timer
+
 ## Key commands
 
 - `cws shell`

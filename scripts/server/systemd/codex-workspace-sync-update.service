@@ -1,0 +1,11 @@
+[Unit]
+Description=Fetch and apply Codex Workspace Sync updates from GitHub
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__ROOT__
+EnvironmentFile=-/etc/codex-workspace-sync/github.env
+ExecStart=/usr/bin/env bash __ROOT__/scripts/server/update_from_github.sh --branch __BRANCH__ --python __PYTHON__ --auth-file /etc/codex-workspace-sync/github.env --state-root __STATE_ROOT__ --restart --restart-unit codex-workspace-sync.service
+User=__USER__
+Group=__USER__

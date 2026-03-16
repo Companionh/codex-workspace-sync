@@ -57,3 +57,47 @@ By default the helper fetches `origin`, fast-forwards the current branch, refres
 3. Run `scripts/server/update_from_github.sh`.
 
 The updater creates a pre-update backup of the live sync state, fast-forwards the checkout, refreshes the editable Python install, and runs a compile check. Use `--restart` with `--restart-unit <unit>` if you also want it to restart a service after the update.
+
+## Installing the Hetzner service
+
+The project now includes sibling-style server install helpers:
+
+- `scripts/server/install_systemd.sh`
+- `scripts/server/install_update_command.sh`
+- `scripts/server/service.env.template`
+- `scripts/server/systemd/codex-workspace-sync.service`
+- `scripts/server/systemd/codex-workspace-sync-update.service`
+- `scripts/server/systemd/codex-workspace-sync-update.timer`
+
+Recommended server layout:
+
+- app checkout: `/opt/codex-workspace-sync/app`
+- live state: `/opt/codex-workspace-sync/state`
+- auth file: `/etc/codex-workspace-sync/github.env`
+- service env file: `/etc/codex-workspace-sync/service.env`
+
+Typical install commands:
+
+```bash
+cd /opt/codex-workspace-sync/app
+sudo mkdir -p /etc/codex-workspace-sync
+sudo cp ./scripts/server/service.env.template /etc/codex-workspace-sync/service.env
+sudo bash ./scripts/server/install_systemd.sh \
+  --root /opt/codex-workspace-sync/app \
+  --python /opt/codex-workspace-sync/app/.venv/bin/python \
+  --user root \
+  --state-root /opt/codex-workspace-sync/state \
+  --port 8787
+sudo bash ./scripts/server/install_update_command.sh \
+  --root /opt/codex-workspace-sync/app \
+  --python /opt/codex-workspace-sync/app/.venv/bin/python \
+  --auth-file /etc/codex-workspace-sync/github.env \
+  --state-root /opt/codex-workspace-sync/state
+```
+
+Then enable the API service:
+
+```bash
+sudo systemctl enable --now codex-workspace-sync.service
+sudo systemctl status codex-workspace-sync.service
+```
