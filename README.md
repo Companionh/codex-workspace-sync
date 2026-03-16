@@ -49,6 +49,7 @@ Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.
 - It assumes Git authentication is already configured on the machine, preferably with SSH.
 - The temp checkout keeps `origin` on the normal repo URL and uses plain `git clone`, `git fetch`, and `git push`.
 - It copies `user.name` and `user.email` from your main checkout into the temp publish checkout when available.
+- It pauses at the end when launched by double-click so you can read the output.
 - The local config file is ignored by Git.
 
 ## Windows repo pull helper
@@ -58,6 +59,7 @@ Use `scripts\\windows\\pull-repo.bat` to update this repo from GitHub on Windows
 - It fetches and fast-forwards the current checkout from `origin` by default.
 - It can autostash local changes before the update and restore them afterward.
 - It can refresh the editable Python install and run a compile check after the pull.
+- It pauses at the end when launched by double-click so you can read the output.
 - It uses the same local config file as the push helper.
 
 ## Hetzner repo update helper

@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions
 set "CWS_PAUSE_ON_ERROR=1"
+set "CWS_PAUSE_ON_SUCCESS=1"
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "REPO_ROOT=%%~fI"
@@ -122,5 +123,6 @@ endlocal
 exit /b 1
 
 :success_exit
+if "%CWS_PAUSE_ON_SUCCESS%"=="1" pause
 endlocal
 exit /b 0

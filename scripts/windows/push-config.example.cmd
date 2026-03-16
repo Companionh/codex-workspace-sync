@@ -16,5 +16,8 @@ rem Optional: settings used by pull-repo.bat.
 rem set "AUTOSTASH=true"
 rem set "REFRESH_INSTALL=true"
 rem set "RUN_COMPILE_CHECK=true"
+rem Optional: window behavior for the Windows batch helpers.
+rem set "CWS_PAUSE_ON_ERROR=1"
+rem set "CWS_PAUSE_ON_SUCCESS=1"
 rem Optional: if the repo has local changes and you want a fixed commit message.
 rem set "COMMIT_MESSAGE=Update codex-workspace-sync"
