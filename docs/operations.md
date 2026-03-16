@@ -40,6 +40,16 @@ Typical flow:
 
 The script exports only the tracked project tree needed for GitHub publishing into a temp checkout under `backups/push_tmp_repo`, then commits and pushes from there. Local runtime state, secrets, caches, and server backups are excluded from the export. Git authentication should already be configured on the Windows machine, ideally through SSH. The helper copies `user.name` and `user.email` from the main repo checkout when available, and you can override them in `push-config.local.cmd` with `GIT_USER_NAME` and `GIT_USER_EMAIL`.
 
+## Updating code on Windows
+
+Use `scripts/windows/pull-repo.bat` to pull the latest project code onto a Windows machine.
+
+1. Make sure Git authentication is already configured on the machine, ideally through SSH.
+2. Reuse `scripts/windows/push-config.local.cmd` if you already have it.
+3. Run `scripts/windows/pull-repo.bat`.
+
+By default the helper fetches `origin`, fast-forwards the current branch, refreshes the editable Python install, and runs `compileall` over `src`, `tests`, and `tools`. If the repo has uncommitted changes, it autostashes them first and restores them after the update.
+
 ## Updating code on Hetzner
 
 1. Copy `scripts/server/github.env.template` to `scripts/server/github.env` or `/etc/codex-workspace-sync/github.env`.
