@@ -1,0 +1,20 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store
+Thumbs.db
+
+# Local runtime state
+.cws/
+state/
+tmp/
+

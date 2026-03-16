@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import json
+import shlex
+
+import typer
+
+from cws.client.sync import ClientService
+
+
+class CWSShell:
+    def __init__(self, service: ClientService) -> None:
+        self.service = service
+
+    def run(self) -> None:
+        typer.echo("Codex Workspace Sync shell. Type 'help' for commands.")
+        while True:
+            try:
+                raw = input("cws> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                typer.echo("")
+                break
+            if not raw:
+                continue
+            if raw in {"exit", "quit"}:
+                break
+            if raw == "help":
+                self._print_help()
+                continue
+            self._dispatch(raw)
+
+    def _print_help(self) -> None:
+        typer.echo(
+            "\n".join(
+                [
+                    "status",
+                    "enroll-device",
+                    "create-superproject",
+                    "update-from-server --superproject <slug>",
+                    "override-current-state --superproject <slug> [--thread <id>]",
+                    "turn-on-sync --superproject <slug>",
+                    "turn-off-sync",
+                    "refresh-thread --superproject <slug> --thread <id>",
+                    "exit",
+                ]
+            )
+        )
+
+    def _dispatch(self, raw: str) -> None:
+        parts = shlex.split(raw)
+        command = parts[0]
+        args = parts[1:]
+        if command == "status":
+            typer.echo(json.dumps(self.service.status(), indent=2))
+            return
+        if command == "turn-off-sync":
+            self.service.turn_off_sync()
+            typer.echo("Sync stopped.")
+            return
+        if command == "enroll-device":
+            from cws.cli import enroll_device_interactive
+
+            enroll_device_interactive(self.service)
+            return
+        if command == "create-superproject":
+            from cws.cli import create_superproject_interactive
+
+            create_superproject_interactive(self.service)
+            return
+        if command in {"update-from-server", "override-current-state", "turn-on-sync", "refresh-thread"}:
+            from cws.cli import run_shell_command
+
+            run_shell_command(self.service, command, args)
+            return
+        typer.echo(f"Unknown command: {command}")
+

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-workspace-sync"
+version = "0.1.0"
+description = "Hybrid Codex session and workspace sync for multi-device superprojects."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+  { name = "Companionh" }
+]
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "httpx>=0.28.0,<1.0.0",
+  "keyring>=25.6.0,<26.0.0",
+  "paramiko>=3.5.0,<4.0.0",
+  "pydantic>=2.10.0,<3.0.0",
+  "typer>=0.15.0,<1.0.0",
+  "uvicorn>=0.34.0,<1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0,<9.0.0"
+]
+
+[project.scripts]
+cws = "cws.cli:app"
+cws-server = "cws.server.bootstrap:app"
+
+[tool.hatch.build]
+include = [
+  "src/cws/**/*.py",
+  "src/cws/templates/**/*",
+  "README.md",
+  "docs/**/*",
+  "skills/**/*",
+  "scripts/**/*"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cws"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
