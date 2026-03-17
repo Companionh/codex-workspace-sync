@@ -74,7 +74,10 @@ def create_app() -> FastAPI:
     ) -> HeartbeatResponse:
         if device_id != request.device_id:
             raise HTTPException(status_code=403, detail="Device mismatch.")
-        return service.heartbeat(device_id)
+        try:
+            return service.heartbeat(device_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.post("/api/lease/release", response_model=HeartbeatResponse)
     def release_lease(

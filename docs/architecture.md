@@ -36,7 +36,7 @@ If a turn is still in progress, the client may stage scratch state, but only com
 
 ## Safety model
 
-- missing heartbeats for 60 seconds expire the global lease
+- missing heartbeats for 2 minutes expire the global lease
 - devices must align with the server before starting live sync
 - new and missing files are summarized in one prompt rather than per-file prompts
 - destructive deletes are quarantined

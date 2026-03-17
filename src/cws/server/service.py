@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 from datetime import datetime, timedelta
@@ -50,6 +51,8 @@ from cws.utils import (
 
 
 class ServerService:
+    heartbeat_timeout_seconds = int(os.environ.get("CWS_HEARTBEAT_TIMEOUT_SECONDS", "120"))
+
     def __init__(self, paths: ServerPaths | None = None) -> None:
         if paths is None:
             repo_root = Path(__file__).resolve().parents[3]
@@ -133,7 +136,7 @@ class ServerService:
                 """
             ).fetchone()
         if row is None:
-            return LeaseRecord()
+            return LeaseRecord(heartbeat_timeout_seconds=self.heartbeat_timeout_seconds)
         lease = LeaseRecord(
             resource_id=row["resource_id"],
             device_id=row["device_id"],
@@ -147,7 +150,10 @@ class ServerService:
         if lease.device_id and lease.last_heartbeat_at:
             expiration = lease.last_heartbeat_at + timedelta(seconds=lease.heartbeat_timeout_seconds)
             if expiration <= utc_now():
-                expired = LeaseRecord(state=LeaseState.EXPIRED)
+                expired = LeaseRecord(
+                    state=LeaseState.EXPIRED,
+                    heartbeat_timeout_seconds=lease.heartbeat_timeout_seconds,
+                )
                 self._write_lease(expired)
                 return expired
         return lease
@@ -192,6 +198,7 @@ class ServerService:
         lease.device_id = request.device_id
         lease.acquired_at = now
         lease.last_heartbeat_at = now
+        lease.heartbeat_timeout_seconds = self.heartbeat_timeout_seconds
         lease.state = LeaseState.ACTIVE
         self._write_lease(lease)
         return AcquireLeaseResponse(lease=lease, granted=True)
@@ -212,6 +219,7 @@ class ServerService:
         lease.device_id = None
         lease.acquired_at = None
         lease.last_heartbeat_at = None
+        lease.heartbeat_timeout_seconds = self.heartbeat_timeout_seconds
         lease.state = LeaseState.AVAILABLE
         self._write_lease(lease)
         return lease

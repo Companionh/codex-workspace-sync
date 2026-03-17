@@ -49,7 +49,7 @@ def test_register_device_and_authenticate(tmp_path: Path) -> None:
     assert authenticated.metadata["platform"] == "windows"
 
 
-def test_global_lease_expires_after_sixty_seconds(tmp_path: Path) -> None:
+def test_global_lease_expires_after_two_minutes(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     response = service.register_device(
         RegisterDeviceRequest(
@@ -61,8 +61,9 @@ def test_global_lease_expires_after_sixty_seconds(tmp_path: Path) -> None:
         AcquireLeaseRequest(device_id=response.device.device_id)
     )
     assert lease_response.granted is True
+    assert lease_response.lease.heartbeat_timeout_seconds == 120
 
-    stale_timestamp = (utc_now() - timedelta(seconds=61)).isoformat()
+    stale_timestamp = (utc_now() - timedelta(seconds=121)).isoformat()
     with service.db.connect() as connection:
         connection.execute(
             "UPDATE leases SET last_heartbeat_at = ? WHERE resource_id = 'global'",

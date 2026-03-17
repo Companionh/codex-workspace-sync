@@ -59,6 +59,10 @@ class PreparedCheckpointInputs:
     documents: list[ManagedDocument]
 
 
+class TransientHeartbeatError(RuntimeError):
+    pass
+
+
 class SyncWorker(threading.Thread):
     def __init__(self, service: "ClientService", superproject_slug: str) -> None:
         super().__init__(daemon=True)
@@ -74,13 +78,13 @@ class SyncWorker(threading.Thread):
     def run(self) -> None:  # pragma: no cover - exercised by integration flow
         api = self.service.api_client()
         while not self.stop_event.is_set():
-            if not self._heartbeat(api):
-                return
-            if not self.service.flush_outbound_queue(api, heartbeat=self._heartbeat):
-                return
-            if not self._heartbeat(api):
-                return
             try:
+                if not self._heartbeat(api):
+                    return
+                if not self.service.flush_outbound_queue(api, heartbeat=self._heartbeat):
+                    return
+                if not self._heartbeat(api):
+                    return
                 prepared = self.service.prepare_live_checkpoint_inputs(
                     self.superproject_slug,
                     show_progress=False,
@@ -93,6 +97,12 @@ class SyncWorker(threading.Thread):
                     show_progress=False,
                     prepared=prepared,
                 )
+            except TransientHeartbeatError as exc:
+                self.service.report_progress(
+                    f"Heartbeat request failed for '{self.superproject_slug}': {exc}. Retrying..."
+                )
+                time.sleep(self.service.heartbeat_interval_seconds)
+                continue
             except Exception as exc:
                 self.service.report_progress(
                     f"Checkpoint build failed for '{self.superproject_slug}': {exc}. Retrying..."
@@ -156,7 +166,10 @@ class SyncWorker(threading.Thread):
         self.service.mark_sync_inactive()
 
     def _heartbeat(self, api: ApiClient) -> bool:
-        heartbeat = api.heartbeat()
+        try:
+            heartbeat = api.heartbeat()
+        except httpx.HTTPError as exc:
+            raise TransientHeartbeatError(str(exc)) from exc
         if heartbeat.accepted:
             return True
         self.service.report_progress("Live sync stopped because this device no longer owns the active lease.")

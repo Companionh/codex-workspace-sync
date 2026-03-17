@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from cws.client.state import ClientStateStore
@@ -589,6 +590,53 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         "Detected a finished Codex turn for 'telegram-bots-suite' in thread(s): thread-a.",
         "Pushing the latest checkpoint for 'telegram-bots-suite' to the server...",
         "Server updated for 'telegram-bots-suite' at revision 7 for thread(s): thread-a.",
+        "Live sync stopped because this device no longer owns the active lease.",
+    ]
+
+
+def test_sync_worker_retries_after_transient_heartbeat_http_error() -> None:
+    class _FakeHeartbeat:
+        def __init__(self, accepted: bool) -> None:
+            self.accepted = accepted
+
+    class _FakeApi:
+        def __init__(self) -> None:
+            self.heartbeat_calls = 0
+
+        def heartbeat(self):
+            self.heartbeat_calls += 1
+            if self.heartbeat_calls == 1:
+                raise httpx.ReadTimeout("temporary timeout")
+            return _FakeHeartbeat(False)
+
+    class _FakeService:
+        heartbeat_interval_seconds = 0
+
+        def __init__(self) -> None:
+            self.api = _FakeApi()
+            self.progress_messages: list[str] = []
+            self.sync_inactive_marked = False
+
+        def api_client(self):
+            return self.api
+
+        def flush_outbound_queue(self, _api, *, heartbeat=None):
+            return True
+
+        def report_progress(self, message: str) -> None:
+            self.progress_messages.append(message)
+
+        def mark_sync_inactive(self) -> None:
+            self.sync_inactive_marked = True
+
+    service = _FakeService()
+    worker = SyncWorker(service, "telegram-bots-suite")
+
+    worker.run()
+
+    assert service.sync_inactive_marked is True
+    assert service.progress_messages == [
+        "Heartbeat request failed for 'telegram-bots-suite': temporary timeout. Retrying...",
         "Live sync stopped because this device no longer owns the active lease.",
     ]
 

@@ -17,7 +17,7 @@ The repo contains:
 - The server is authoritative for live superproject state.
 - Devices initiate heartbeats; the server does not poll clients.
 - A global active lease prevents multiple devices from live-syncing at once.
-- Missing heartbeats for 60 seconds automatically expire the active lease.
+- Missing heartbeats for 2 minutes automatically expire the active lease.
 - Raw Codex artifacts are synced for resume fidelity.
 - Normalized checkpoints and manifests are synced for validation and recovery.
 - Suspicious deletes and destructive Markdown drift are quarantined instead of auto-propagated.

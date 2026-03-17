@@ -12,7 +12,7 @@
 2. Server grants it if no live device owns it.
 3. If another live device owns it, the requester must abort or steal the lease.
 4. Heartbeats refresh `last_heartbeat_at`.
-5. If heartbeats stop for 60 seconds, the lease expires automatically.
+5. If heartbeats stop for 2 minutes, the lease expires automatically.
 
 ## Alignment flow
 

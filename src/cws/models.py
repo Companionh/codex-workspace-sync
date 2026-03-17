@@ -39,7 +39,7 @@ class LeaseRecord(BaseModel):
     device_id: str | None = None
     acquired_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
-    heartbeat_timeout_seconds: int = 60
+    heartbeat_timeout_seconds: int = 120
     state: LeaseState = LeaseState.AVAILABLE
 
 
