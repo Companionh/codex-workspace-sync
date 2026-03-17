@@ -25,6 +25,13 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
     codex_root = tmp_path / ".codex"
     session_dir = codex_root / "sessions" / "2026" / "03" / "16"
     session_dir.mkdir(parents=True)
+    (codex_root / "skills" / "custom-skill").mkdir(parents=True)
+    (codex_root / "skills" / "custom-skill" / "SKILL.md").write_text("custom skill", encoding="utf-8")
+    (codex_root / "vendor_imports" / "skills" / "vendor-skill").mkdir(parents=True)
+    (codex_root / "vendor_imports" / "skills" / "vendor-skill" / "SKILL.md").write_text(
+        "vendor skill",
+        encoding="utf-8",
+    )
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     unrelated_root = tmp_path / "other-workspace"
@@ -88,9 +95,15 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
 
     assert bundle.thread_id == "thread-1"
     assert bundle.thread_name == "demo"
+    assert bundle.last_user_turn_preview == "hello world"
     assert bundle.session_ids == ["thread-1"]
     assert any(artifact.relative_path.endswith("rollout-abc.jsonl") for artifact in bundle.files)
     assert not any(artifact.relative_path.endswith("rollout-def.jsonl") for artifact in bundle.files)
+    assert any(artifact.relative_path == "skills/custom-skill/SKILL.md" for artifact in bundle.files)
+    assert any(
+        artifact.relative_path == "vendor_imports/skills/vendor-skill/SKILL.md"
+        for artifact in bundle.files
+    )
     assert len(hashes) == 2
 
 
@@ -123,6 +136,35 @@ def test_list_local_threads_prefers_codex_thread_name(tmp_path: Path) -> None:
     assert len(threads) == 1
     assert threads[0].thread_id == "thread-1"
     assert threads[0].thread_name == "Clone Companionh repos"
+
+
+def test_list_local_threads_includes_last_user_turn_preview(tmp_path: Path) -> None:
+    codex_root = tmp_path / ".codex"
+    session_dir = codex_root / "sessions" / "2026" / "03" / "16"
+    session_dir.mkdir(parents=True)
+    session_path = session_dir / "rollout-abc.jsonl"
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-1", "cwd": str(tmp_path)}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "# Context from my IDE setup:\n\n## Open tabs:\n- README.md: repo/README.md\n\n## My request for Codex:\nfirst line\nsecond line\nthird line",
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    threads = list_local_threads(codex_root)
+
+    assert threads[0].last_user_turn_preview == "first line\nsecond line"
+    assert threads[0].thread_name == "first line second line"
 
 
 def test_atomic_write_bytes_retries_transient_permission_error(monkeypatch, tmp_path: Path) -> None:

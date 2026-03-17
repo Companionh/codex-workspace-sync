@@ -88,6 +88,7 @@ class RawSessionBundle(BaseModel):
     thread_id: str | None = None
     thread_name: str | None = None
     thread_updated_at: datetime | None = None
+    last_user_turn_preview: str | None = None
     session_ids: list[str] = Field(default_factory=list)
     files: list[RawFileArtifact] = Field(default_factory=list)
 
@@ -96,6 +97,7 @@ class ThreadSummary(BaseModel):
     thread_id: str
     thread_name: str
     updated_at: datetime
+    last_user_turn_preview: str | None = None
     tracked: bool = False
     source: Literal["local", "server"] = "local"
 

@@ -38,6 +38,7 @@ from cws.server.db import ServerDatabase
 from cws.server.security import hash_secret, verify_secret
 from cws.utils import (
     atomic_write_text,
+    decode_b64,
     dump_json_file,
     encode_b64,
     relative_posix,
@@ -449,22 +450,136 @@ class ServerService:
             shared_skills=self._shared_skills(),
         )
 
+    @staticmethod
+    def _clean_user_message(message: str) -> str | None:
+        cleaned = message.strip()
+        if not cleaned:
+            return None
+
+        if cleaned.startswith("<environment_context>"):
+            marker = "</environment_context>"
+            marker_index = cleaned.find(marker)
+            if marker_index != -1:
+                cleaned = cleaned[marker_index + len(marker) :].strip()
+        if not cleaned:
+            return None
+
+        lines = cleaned.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip() == "## My request for Codex:":
+                request_lines = [value.rstrip() for value in lines[index + 1 :] if value.strip()]
+                request_text = "\n".join(request_lines).strip()
+                if request_text:
+                    return request_text
+
+        filtered_lines: list[str] = []
+        skip_bullets = False
+        boilerplate_headers = {
+            "# Context from my IDE setup:",
+            "## Open tabs:",
+            "## Active file:",
+        }
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line in boilerplate_headers:
+                skip_bullets = line == "## Open tabs:"
+                continue
+            if skip_bullets and line.startswith("- "):
+                continue
+            skip_bullets = False
+            filtered_lines.append(line)
+        fallback_text = "\n".join(filtered_lines).strip()
+        return fallback_text or None
+
+    def _thread_name_from_raw_bundle(self, checkpoint: ThreadCheckpoint) -> str | None:
+        raw_bundle = checkpoint.raw_bundle
+        thread_id = checkpoint.thread_id
+        if raw_bundle is None or thread_id is None:
+            return None
+        for artifact in raw_bundle.files:
+            if artifact.relative_path != "session_index.jsonl":
+                continue
+            content = decode_b64(artifact.content_b64).decode("utf-8", errors="ignore")
+            for line in content.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("id") != thread_id:
+                    continue
+                thread_name = payload.get("thread_name")
+                if isinstance(thread_name, str) and thread_name.strip():
+                    return thread_name.strip()
+        return None
+
+    def _preview_from_raw_bundle(self, checkpoint: ThreadCheckpoint) -> str | None:
+        raw_bundle = checkpoint.raw_bundle
+        thread_id = checkpoint.thread_id
+        if raw_bundle is None:
+            return None
+        user_messages: list[str] = []
+        for artifact in raw_bundle.files:
+            if not artifact.relative_path.startswith("sessions/") or not artifact.relative_path.endswith(".jsonl"):
+                continue
+            content = decode_b64(artifact.content_b64).decode("utf-8", errors="ignore")
+            session_matches = thread_id is None
+            for line in content.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") == "session_meta":
+                    meta = payload.get("payload", {})
+                    session_matches = thread_id is None or meta.get("id") == thread_id
+                    continue
+                if not session_matches or payload.get("type") != "event_msg":
+                    continue
+                message_payload = payload.get("payload", {})
+                if message_payload.get("type") != "user_message":
+                    continue
+                message = str(message_payload.get("message", "")).strip()
+                if not message:
+                    continue
+                cleaned = self._clean_user_message(message)
+                if cleaned:
+                    user_messages.append(cleaned)
+        if not user_messages:
+            return None
+        lines = [line.strip() for line in user_messages[-1].splitlines() if line.strip()]
+        if not lines:
+            return None
+        return "\n".join(lines[:2])
+
     def list_threads(self, slug: str) -> list[ThreadSummary]:
         summaries: list[ThreadSummary] = []
         for checkpoint in self._latest_thread_checkpoints(slug):
             if not checkpoint.thread_id:
                 continue
+            derived_name = self._thread_name_from_raw_bundle(checkpoint)
+            derived_preview = self._preview_from_raw_bundle(checkpoint)
             summaries.append(
                 ThreadSummary(
                     thread_id=checkpoint.thread_id,
                     thread_name=(
-                        (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
+                        derived_name
+                        or (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
+                        or derived_preview
                         or checkpoint.summary
                         or checkpoint.thread_id
                     ),
                     updated_at=(
                         (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
                         or checkpoint.created_at
+                    ),
+                    last_user_turn_preview=(
+                        (checkpoint.raw_bundle.last_user_turn_preview if checkpoint.raw_bundle else None)
+                        or derived_preview
                     ),
                     tracked=True,
                     source="server",

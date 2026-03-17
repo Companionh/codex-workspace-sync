@@ -19,7 +19,7 @@ from cws.models import (
     ThreadCheckpoint,
 )
 from cws.server.service import ServerService
-from cws.utils import sha256_text, utc_now
+from cws.utils import encode_b64, sha256_text, utc_now
 
 
 def make_service(tmp_path: Path) -> ServerService:
@@ -301,6 +301,7 @@ def test_list_threads_uses_raw_bundle_thread_name(tmp_path: Path) -> None:
                     captured_at=utc_now(),
                     thread_id="thread-a",
                     thread_name="Clone Companionh repos",
+                    last_user_turn_preview="first line\nsecond line",
                     session_ids=["thread-a"],
                     files=[],
                 ),
@@ -314,3 +315,94 @@ def test_list_threads_uses_raw_bundle_thread_name(tmp_path: Path) -> None:
     assert len(threads) == 1
     assert threads[0].thread_id == "thread-a"
     assert threads[0].thread_name == "Clone Companionh repos"
+    assert threads[0].last_user_turn_preview == "first line\nsecond line"
+
+
+def test_list_threads_backfills_name_and_preview_from_raw_bundle_files(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+    documents = [ManagedDocument(record=record, content="replacement") for record in manifest.managed_files]
+
+    session_index = json.dumps(
+        {
+            "id": "thread-a",
+            "thread_name": "Clone Companionh repos",
+            "updated_at": utc_now().isoformat(),
+        }
+    )
+    session_file = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "thread-a", "cwd": "c:\\coding projects\\Telegram-bot-suite"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "# Context from my IDE setup:\n\n## Open tabs:\n- README.md: codex-workplace-sync/README.md\n\n## My request for Codex:\nfirst line\nsecond line\nthird line",
+                    },
+                }
+            ),
+        ]
+    )
+    service.push_checkpoint(
+        device.device.device_id,
+        PushCheckpointRequest(
+            checkpoint=ThreadCheckpoint(
+                superproject_slug="telegram-suite",
+                thread_id="thread-a",
+                revision=0,
+                created_at=utc_now(),
+                source_device_id=device.device.device_id,
+                canonical=True,
+                base_revision=manifest.revision,
+                turn_hashes=["turn-a"],
+                summary="fallback summary",
+                manifest=manifest.model_copy(update={"managed_files": [doc.record for doc in documents]}),
+                managed_documents=documents,
+                raw_bundle=RawSessionBundle(
+                    captured_at=utc_now(),
+                    thread_id="thread-a",
+                    thread_name=None,
+                    last_user_turn_preview=None,
+                    session_ids=["thread-a"],
+                    files=[
+                        RawFileArtifact(
+                            relative_path="session_index.jsonl",
+                            sha256="index",
+                            content_b64=encode_b64(session_index.encode("utf-8")),
+                        ),
+                        RawFileArtifact(
+                            relative_path="sessions/2026/03/17/thread-a.jsonl",
+                            sha256="session-a",
+                            content_b64=encode_b64(session_file.encode("utf-8")),
+                        ),
+                    ],
+                ),
+                snapshot_hash="snapshot-thread-a",
+            )
+        ),
+    )
+
+    threads = service.list_threads("telegram-suite")
+
+    assert len(threads) == 1
+    assert threads[0].thread_name == "Clone Companionh repos"
+    assert threads[0].last_user_turn_preview == "first line\nsecond line"

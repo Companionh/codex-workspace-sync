@@ -50,6 +50,15 @@ class DiffSummary:
         return bool(self.new_on_server or self.new_local or self.changed)
 
 
+@dataclass
+class PreparedCheckpointInputs:
+    local_state: ClientSuperprojectState
+    incoming_manifest: Any
+    base_revision: int
+    workspace_roots: list[Path]
+    documents: list[ManagedDocument]
+
+
 class SyncWorker(threading.Thread):
     def __init__(self, service: "ClientService", superproject_slug: str) -> None:
         super().__init__(daemon=True)
@@ -66,16 +75,20 @@ class SyncWorker(threading.Thread):
         api = self.service.api_client()
         while not self.stop_event.is_set():
             self.service.flush_outbound_queue(api)
-            heartbeat = api.heartbeat()
-            if not heartbeat.accepted:
-                self.service.report_progress("Live sync stopped because this device no longer owns the active lease.")
-                self.service.mark_sync_inactive()
+            if not self._heartbeat(api):
                 return
             try:
+                prepared = self.service.prepare_live_checkpoint_inputs(
+                    self.superproject_slug,
+                    show_progress=False,
+                )
+                if not self._heartbeat(api):
+                    return
                 checkpoints = self.service.build_live_checkpoints(
                     self.superproject_slug,
                     canonical=True,
                     show_progress=False,
+                    prepared=prepared,
                 )
             except Exception as exc:
                 self.service.report_progress(
@@ -130,6 +143,14 @@ class SyncWorker(threading.Thread):
                 self.pending_checkpoints[key] = checkpoint
             time.sleep(self.service.heartbeat_interval_seconds)
         self.service.mark_sync_inactive()
+
+    def _heartbeat(self, api: ApiClient) -> bool:
+        heartbeat = api.heartbeat()
+        if heartbeat.accepted:
+            return True
+        self.service.report_progress("Live sync stopped because this device no longer owns the active lease.")
+        self.service.mark_sync_inactive()
+        return False
 
 
 class ClientService:
@@ -544,6 +565,9 @@ class ClientService:
             thread_id=thread_id,
             thread_name=thread_name,
             updated_at=updated_at,
+            last_user_turn_preview=(
+                checkpoint.raw_bundle.last_user_turn_preview if checkpoint.raw_bundle else None
+            ),
             tracked=thread_id in self._tracked_thread_ids(checkpoint.superproject_slug),
             source="server",
         )
@@ -555,6 +579,8 @@ class ClientService:
             local_match = local_lookup.get(summary.thread_id)
             if local_match and local_match.thread_name:
                 summary.thread_name = local_match.thread_name
+            if local_match and not summary.last_user_turn_preview and local_match.last_user_turn_preview:
+                summary.last_user_turn_preview = local_match.last_user_turn_preview
             summary.tracked = summary.thread_id in self._tracked_thread_ids(slug)
         return sorted(summaries, key=lambda item: (item.updated_at, item.thread_name, item.thread_id), reverse=True)
 
@@ -772,14 +798,12 @@ class ClientService:
                     continue
                 raise
 
-    def build_checkpoint(
+    def prepare_live_checkpoint_inputs(
         self,
         slug: str,
         *,
-        canonical: bool,
         show_progress: bool = True,
-        thread_id: str | None = None,
-    ) -> ThreadCheckpoint:
+    ) -> PreparedCheckpointInputs:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
@@ -800,12 +824,29 @@ class ClientService:
             }
         )
         workspace_roots = [Path(path) for path in local_state.workspace_roots if Path(path).exists()]
+        return PreparedCheckpointInputs(
+            local_state=local_state,
+            incoming_manifest=incoming_manifest,
+            base_revision=manifest.revision,
+            workspace_roots=workspace_roots,
+            documents=documents,
+        )
+
+    def _build_checkpoint_from_inputs(
+        self,
+        slug: str,
+        *,
+        prepared: PreparedCheckpointInputs,
+        canonical: bool,
+        show_progress: bool = True,
+        thread_id: str | None = None,
+    ) -> ThreadCheckpoint:
         raw_bundle = None
         turn_hashes: list[str] = []
         if thread_id is not None:
             if show_progress:
                 self.report_progress(f"Capturing Codex session artifacts for '{slug}'...")
-            raw_bundle = build_raw_session_bundle(self.codex_root, workspace_roots, thread_id=thread_id)
+            raw_bundle = build_raw_session_bundle(self.codex_root, prepared.workspace_roots, thread_id=thread_id)
             session_files = [
                 self.codex_root / artifact.relative_path
                 for artifact in raw_bundle.files
@@ -817,7 +858,7 @@ class ClientService:
         snapshot_hash = sha256_text(
             json.dumps(
                 {
-                    "documents": [document.record.model_dump(mode="json") for document in documents],
+                    "documents": [document.record.model_dump(mode="json") for document in prepared.documents],
                     "raw_files": self._stable_raw_snapshot_entries(raw_bundle) if raw_bundle else [],
                     "turn_hashes": turn_hashes,
                     "thread_id": thread_id,
@@ -826,25 +867,42 @@ class ClientService:
             )
         )
         summary = (
-            f"Synced {len(documents)} managed Markdown files and {len(raw_bundle.files)} Codex artifacts for "
+            f"Synced {len(prepared.documents)} managed Markdown files and {len(raw_bundle.files)} Codex artifacts for "
             f"{raw_bundle.thread_name or thread_id}."
             if raw_bundle is not None
-            else f"Synced {len(documents)} managed Markdown files."
+            else f"Synced {len(prepared.documents)} managed Markdown files."
         )
         return ThreadCheckpoint(
             superproject_slug=slug,
             thread_id=thread_id or (raw_bundle.thread_id if raw_bundle else None),
-            revision=incoming_manifest.revision,
+            revision=prepared.incoming_manifest.revision,
             created_at=utc_now(),
             source_device_id=self.config().device_id or "unknown-device",
             canonical=canonical,
-            base_revision=manifest.revision,
+            base_revision=prepared.base_revision,
             turn_hashes=turn_hashes,
             summary=summary,
-            manifest=incoming_manifest,
-            managed_documents=documents,
+            manifest=prepared.incoming_manifest,
+            managed_documents=prepared.documents,
             raw_bundle=raw_bundle,
             snapshot_hash=snapshot_hash,
+        )
+
+    def build_checkpoint(
+        self,
+        slug: str,
+        *,
+        canonical: bool,
+        show_progress: bool = True,
+        thread_id: str | None = None,
+    ) -> ThreadCheckpoint:
+        prepared = self.prepare_live_checkpoint_inputs(slug, show_progress=show_progress)
+        return self._build_checkpoint_from_inputs(
+            slug,
+            prepared=prepared,
+            canonical=canonical,
+            show_progress=show_progress,
+            thread_id=thread_id,
         )
 
     def build_live_checkpoints(
@@ -853,13 +911,24 @@ class ClientService:
         *,
         canonical: bool,
         show_progress: bool = True,
+        prepared: PreparedCheckpointInputs | None = None,
     ) -> list[ThreadCheckpoint]:
+        prepared_inputs = prepared or self.prepare_live_checkpoint_inputs(slug, show_progress=show_progress)
         tracked_thread_ids = self._tracked_thread_ids(slug)
         if not tracked_thread_ids:
-            return [self.build_checkpoint(slug, canonical=canonical, show_progress=show_progress, thread_id=None)]
+            return [
+                self._build_checkpoint_from_inputs(
+                    slug,
+                    prepared=prepared_inputs,
+                    canonical=canonical,
+                    show_progress=show_progress,
+                    thread_id=None,
+                )
+            ]
         return [
-            self.build_checkpoint(
+            self._build_checkpoint_from_inputs(
                 slug,
+                prepared=prepared_inputs,
                 canonical=canonical,
                 show_progress=show_progress,
                 thread_id=thread_id,

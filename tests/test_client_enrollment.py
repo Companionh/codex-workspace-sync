@@ -20,6 +20,7 @@ from cws.models import (
     RawFileArtifact,
     RawSessionBundle,
     SuperprojectManifest,
+    ThreadSummary,
     ThreadCheckpoint,
 )
 from cws.utils import encode_b64, utc_now
@@ -479,7 +480,7 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
 
         def heartbeat(self):
             self.heartbeat_calls += 1
-            return _FakeHeartbeat(self.heartbeat_calls < 3)
+            return _FakeHeartbeat(self.heartbeat_calls < 5)
 
         def push_checkpoint(self, slug, request):
             self.pushes.append((slug, request))
@@ -490,6 +491,7 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
 
         def __init__(self) -> None:
             self.api = _FakeApi()
+            self.prepared = object()
             self.checkpoints = iter(
                 [
                     ThreadCheckpoint(
@@ -547,9 +549,14 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         def flush_outbound_queue(self, _api):
             return None
 
-        def build_live_checkpoints(self, _slug, *, canonical, show_progress):
+        def prepare_live_checkpoint_inputs(self, _slug, *, show_progress):
+            assert show_progress is False
+            return self.prepared
+
+        def build_live_checkpoints(self, _slug, *, canonical, show_progress, prepared=None):
             assert canonical is True
             assert show_progress is False
+            assert prepared is self.prepared
             return [next(self.checkpoints)]
 
         def report_progress(self, message: str) -> None:
@@ -745,6 +752,63 @@ def test_update_from_server_reports_updated_thread_ids(tmp_path) -> None:
     ]
 
 
+def test_threadlist_backfills_preview_from_local_thread_cache(tmp_path) -> None:
+    codex_root = tmp_path / ".codex"
+    session_dir = codex_root / "sessions" / "2026" / "03" / "16"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_dir.joinpath("rollout-thread-a.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-a", "cwd": str(tmp_path)}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "# Context from my IDE setup:\n\n## My request for Codex:\nfirst line\nsecond line",
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    tracked_thread_ids=["thread-a"],
+                )
+            }
+        )
+    )
+
+    class _ThreadListApiClient:
+        def list_threads(self, _slug: str):
+            return [
+                ThreadSummary(
+                    thread_id="thread-a",
+                    thread_name="fallback name",
+                    updated_at=utc_now(),
+                    last_user_turn_preview=None,
+                    tracked=False,
+                    source="server",
+                )
+            ]
+
+    service = ClientService(state_store=state_store, codex_root=codex_root)
+    service.api_client = lambda: _ThreadListApiClient()  # type: ignore[method-assign]
+
+    threads = service.threadlist("telegram-bots-suite")
+
+    assert len(threads) == 1
+    assert threads[0].last_user_turn_preview == "first line\nsecond line"
+    assert threads[0].tracked is True
+
+
 def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) -> None:
     service = ClientService(codex_root=tmp_path / ".codex")
     bundle = RawSessionBundle(
@@ -765,6 +829,11 @@ def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) 
                 sha256="session",
                 content_b64=encode_b64(b"session"),
             ),
+            RawFileArtifact(
+                relative_path="skills/custom-skill/SKILL.md",
+                sha256="skill",
+                content_b64=encode_b64(b"skill-body"),
+            ),
         ],
     )
 
@@ -783,6 +852,9 @@ def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) 
     assert (tmp_path / ".codex" / "session_index.jsonl").read_text(encoding="utf-8") == "index"
     assert not (tmp_path / ".codex" / "state_5.sqlite-shm").exists()
     assert not (tmp_path / ".codex" / "sessions" / "2026" / "03" / "16" / "test-session.jsonl").exists()
+    assert (tmp_path / ".codex" / "skills" / "custom-skill" / "SKILL.md").read_text(encoding="utf-8") == (
+        "skill-body"
+    )
 
 
 def test_disconnect_superproject_wipes_local_managed_root(tmp_path) -> None:

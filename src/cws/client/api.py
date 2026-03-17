@@ -103,6 +103,9 @@ class ApiClient:
                         (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
                         or checkpoint.created_at
                     ),
+                    last_user_turn_preview=(
+                        checkpoint.raw_bundle.last_user_turn_preview if checkpoint.raw_bundle else None
+                    ),
                     tracked=True,
                     source="server",
                 )

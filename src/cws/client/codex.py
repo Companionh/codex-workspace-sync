@@ -112,6 +112,49 @@ def _session_meta(path: Path) -> dict[str, object] | None:
 
 
 def _fallback_thread_name(session_files: list[Path]) -> str | None:
+    preview = _last_user_turn_preview(session_files)
+    if preview:
+        return re.sub(r"\s+", " ", preview).strip()[:80]
+    return None
+
+
+def _clean_user_message(message: str) -> str | None:
+    cleaned = re.sub(r"(?is)^<environment_context>.*?</environment_context>", "", message).strip()
+    if not cleaned:
+        return None
+
+    lines = cleaned.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == "## My request for Codex:":
+            request_lines = [value.rstrip() for value in lines[index + 1 :] if value.strip()]
+            request_text = "\n".join(request_lines).strip()
+            if request_text:
+                return request_text
+
+    filtered_lines: list[str] = []
+    skip_bullets = False
+    boilerplate_headers = {
+        "# Context from my IDE setup:",
+        "## Open tabs:",
+        "## Active file:",
+    }
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line in boilerplate_headers:
+            skip_bullets = line == "## Open tabs:"
+            continue
+        if skip_bullets and line.startswith("- "):
+            continue
+        skip_bullets = False
+        filtered_lines.append(line)
+    fallback_text = "\n".join(filtered_lines).strip()
+    return fallback_text or None
+
+
+def _last_user_turn_preview(session_files: list[Path]) -> str | None:
+    user_messages: list[str] = []
     for path in sorted(session_files):
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -126,12 +169,29 @@ def _fallback_thread_name(session_files: list[Path]) -> str | None:
             message = str(message_payload.get("message", "")).strip()
             if not message:
                 continue
-            message = re.sub(r"(?is)^<environment_context>.*?</environment_context>", "", message).strip()
-            message = re.sub(r"\s+", " ", message).strip()
-            if not message:
+            cleaned = _clean_user_message(message)
+            if cleaned:
+                user_messages.append(cleaned)
+    if not user_messages:
+        return None
+    lines = [line.strip() for line in user_messages[-1].splitlines() if line.strip()]
+    if not lines:
+        return None
+    return "\n".join(lines[:2])
+
+
+def _iter_skill_files(codex_root: Path) -> list[Path]:
+    results: list[Path] = []
+    for root in (codex_root / "skills", codex_root / "vendor_imports" / "skills"):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_dir():
                 continue
-            return message[:80]
-    return None
+            if any(part in EXCLUDED_DIR_NAMES for part in path.parts):
+                continue
+            results.append(path)
+    return sorted(results)
 
 
 def _collect_thread_entries(codex_root: Path) -> list[dict[str, object]]:
@@ -182,6 +242,7 @@ def _collect_thread_entries(codex_root: Path) -> list[dict[str, object]]:
                 "thread_id": thread["thread_id"],
                 "thread_name": thread_name,
                 "updated_at": thread["updated_at"] or utc_now(),
+                "last_user_turn_preview": _last_user_turn_preview(session_files),
                 "session_files": session_files,
                 "workspace_roots": sorted(thread["workspace_roots"]),
             }
@@ -196,6 +257,7 @@ def list_local_threads(codex_root: Path) -> list[ThreadSummary]:
             thread_id=entry["thread_id"],
             thread_name=entry["thread_name"],
             updated_at=entry["updated_at"],
+            last_user_turn_preview=entry["last_user_turn_preview"],
             source="local",
         )
         for entry in _collect_thread_entries(codex_root)
@@ -207,7 +269,7 @@ def _matching_session_files(
     workspace_roots: list[Path],
     *,
     thread_id: str | None = None,
-) -> tuple[list[Path], list[str], str | None, datetime | None]:
+) -> tuple[list[Path], list[str], str | None, datetime | None, str | None]:
     entries = _collect_thread_entries(codex_root)
     if thread_id:
         entries = [entry for entry in entries if entry["thread_id"] == thread_id]
@@ -225,15 +287,17 @@ def _matching_session_files(
     matched_session_ids: list[str] = []
     selected_name: str | None = None
     selected_updated_at: datetime | None = None
+    selected_preview: str | None = None
     for entry in entries:
         matched_files.extend(entry["session_files"])
         matched_session_ids.append(entry["thread_id"])
         if (thread_id and entry["thread_id"] == thread_id) or (thread_id is None and len(entries) == 1):
             selected_name = entry["thread_name"]
             selected_updated_at = entry["updated_at"]
+            selected_preview = entry["last_user_turn_preview"]
 
     matched_files.sort(key=lambda path: (path.stat().st_mtime, str(path).lower()))
-    return matched_files, matched_session_ids, selected_name, selected_updated_at
+    return matched_files, matched_session_ids, selected_name, selected_updated_at, selected_preview
 
 
 def extract_turn_hashes(session_files: list[Path]) -> list[str]:
@@ -256,7 +320,7 @@ def build_raw_session_bundle(
     *,
     thread_id: str | None = None,
 ) -> RawSessionBundle:
-    session_files, session_ids, thread_name, thread_updated_at = _matching_session_files(
+    session_files, session_ids, thread_name, thread_updated_at, last_user_turn_preview = _matching_session_files(
         codex_root,
         workspace_roots,
         thread_id=thread_id,
@@ -287,12 +351,21 @@ def build_raw_session_bundle(
                 content_b64=encode_b64(path.read_bytes()),
             )
         )
+    for path in _iter_skill_files(codex_root):
+        files.append(
+            RawFileArtifact(
+                relative_path=relative_posix(path, codex_root),
+                sha256=sha256_file(path),
+                content_b64=encode_b64(path.read_bytes()),
+            )
+        )
     bundle_thread_id = thread_id or (session_ids[-1] if session_ids else None)
     return RawSessionBundle(
         captured_at=utc_now(),
         thread_id=bundle_thread_id,
         thread_name=thread_name,
         thread_updated_at=thread_updated_at,
+        last_user_turn_preview=last_user_turn_preview,
         session_ids=session_ids,
         files=files,
     )
