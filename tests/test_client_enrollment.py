@@ -223,6 +223,70 @@ def test_update_from_server_adopts_server_managed_file_ids(tmp_path) -> None:
     assert baseline_path.read_text(encoding="utf-8") == "# server\n"
 
 
+def test_update_from_server_reports_progress_steps(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    managed_root=str(managed_root),
+                    managed_file_ids={"baseline/base_rules.md": "local-file-id"},
+                    last_alignment_action=AlignmentAction.NONE,
+                )
+            }
+        )
+    )
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    server_state = PullStateResponse(
+        manifest=SuperprojectManifest(
+            slug="telegram-bots-suite",
+            name="telegram-bots-suite",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            managed_files=[server_document.record],
+        ),
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=None,
+        pending_resolutions=[],
+    )
+    progress_messages: list[str] = []
+    service = ClientService(
+        state_store=state_store,
+        codex_root=tmp_path / ".codex",
+        progress_callback=progress_messages.append,
+    )
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    service.update_from_server("telegram-bots-suite", assume_yes=True)
+
+    assert progress_messages == [
+        "Connecting to the server for 'telegram-bots-suite'...",
+        "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
+        "Applying server updates for 'telegram-bots-suite'...",
+        "Syncing shared skills for 'telegram-bots-suite'...",
+        "Update from server finished for 'telegram-bots-suite'.",
+    ]
+
+
 def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) -> None:
     service = ClientService(codex_root=tmp_path / ".codex")
     bundle = RawSessionBundle(

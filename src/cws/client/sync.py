@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import shlex
 import shutil
@@ -61,9 +62,14 @@ class SyncWorker(threading.Thread):
             self.service.flush_outbound_queue(api)
             heartbeat = api.heartbeat()
             if not heartbeat.accepted:
+                self.service.report_progress("Live sync stopped because this device no longer owns the active lease.")
                 self.service.mark_sync_inactive()
                 return
-            checkpoint = self.service.build_checkpoint(self.superproject_slug, canonical=True)
+            checkpoint = self.service.build_checkpoint(
+                self.superproject_slug,
+                canonical=True,
+                show_progress=False,
+            )
             if checkpoint.snapshot_hash == self.last_pushed_hash:
                 time.sleep(self.service.heartbeat_interval_seconds)
                 continue
@@ -71,12 +77,21 @@ class SyncWorker(threading.Thread):
                 self.pending_checkpoint = checkpoint
             elif self.pending_checkpoint.snapshot_hash == checkpoint.snapshot_hash:
                 try:
+                    self.service.report_progress(
+                        f"Pushing the latest checkpoint for '{self.superproject_slug}' to the server..."
+                    )
                     api.push_checkpoint(
                         self.superproject_slug,
                         PushCheckpointRequest(checkpoint=checkpoint),
                     )
                     self.last_pushed_hash = checkpoint.snapshot_hash
+                    self.service.report_progress(
+                        f"Checkpoint for '{self.superproject_slug}' synced successfully."
+                    )
                 except Exception:
+                    self.service.report_progress(
+                        f"Server push failed for '{self.superproject_slug}'. Queueing the checkpoint for retry."
+                    )
                     self.service.enqueue_checkpoint(checkpoint)
                 self.pending_checkpoint = None
             else:
@@ -96,10 +111,20 @@ class SyncWorker(threading.Thread):
 class ClientService:
     heartbeat_interval_seconds = 15
 
-    def __init__(self, state_store: ClientStateStore | None = None, codex_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        state_store: ClientStateStore | None = None,
+        codex_root: Path | None = None,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self.state_store = state_store or ClientStateStore()
         self.codex_root = codex_root or (Path.home() / ".codex")
         self.worker: SyncWorker | None = None
+        self.progress_callback = progress_callback
+
+    def report_progress(self, message: str) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(message)
 
     def config(self) -> ClientConfig:
         return self.state_store.load_config()
@@ -414,8 +439,10 @@ class ClientService:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
+        self.report_progress(f"Connecting to the server for '{slug}'...")
         managed_root = Path(local_state.managed_root)
         server_state = self.api_client().pull_state(slug)
+        self.report_progress(f"Comparing local Markdown for '{slug}' with the server copy...")
         diff = self.compare_with_server(slug)
         if diff.has_mismatch and not assume_yes:
             message = (
@@ -424,6 +451,7 @@ class ClientService:
             )
             if input(f"{message} [y/N]: ").strip().lower() not in {"y", "yes"}:
                 return diff
+        self.report_progress(f"Applying server updates for '{slug}'...")
         quarantine_root = self.state_store.paths.cache_dir / "quarantine" / slug / utc_now().strftime("%Y%m%d%H%M%S")
         for path in diff.new_local:
             source = managed_root / path
@@ -436,8 +464,10 @@ class ClientService:
             target = managed_root / document.record.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(target, document.content)
+        self.report_progress(f"Syncing shared skills for '{slug}'...")
         self._write_shared_skills(server_state.shared_skills)
         if server_state.latest_checkpoint and server_state.latest_checkpoint.raw_bundle:
+            self.report_progress(f"Applying the latest Codex session bundle for '{slug}'...")
             self._apply_raw_bundle(server_state.latest_checkpoint.raw_bundle)
             if server_state.latest_checkpoint.thread_id:
                 local_state.pending_thread_refreshes[server_state.latest_checkpoint.thread_id] = (
@@ -454,6 +484,7 @@ class ClientService:
         config = self.config()
         config.superprojects[slug] = local_state
         self.save_config(config)
+        self.report_progress(f"Update from server finished for '{slug}'.")
         return diff
 
     @staticmethod
@@ -475,16 +506,20 @@ class ClientService:
                     continue
                 raise
 
-    def build_checkpoint(self, slug: str, *, canonical: bool) -> ThreadCheckpoint:
+    def build_checkpoint(self, slug: str, *, canonical: bool, show_progress: bool = True) -> ThreadCheckpoint:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
+        if show_progress:
+            self.report_progress(f"Scanning managed Markdown for '{slug}'...")
         managed_root = Path(local_state.managed_root)
         documents, updated_ids = build_managed_documents(managed_root, local_state.managed_file_ids)
         local_state.managed_file_ids = updated_ids
         config = self.config()
         config.superprojects[slug] = local_state
         self.save_config(config)
+        if show_progress:
+            self.report_progress(f"Loading the current server manifest for '{slug}'...")
         manifest = self.api_client().pull_state(slug).manifest
         incoming_manifest = manifest.model_copy(
             update={
@@ -492,6 +527,8 @@ class ClientService:
             }
         )
         workspace_roots = [Path(path) for path in local_state.workspace_roots if Path(path).exists()]
+        if show_progress:
+            self.report_progress(f"Capturing Codex session artifacts for '{slug}'...")
         raw_bundle = build_raw_session_bundle(self.codex_root, workspace_roots)
         session_files = [
             self.codex_root / artifact.relative_path
@@ -499,6 +536,8 @@ class ClientService:
             if artifact.relative_path.startswith("sessions/")
         ]
         turn_hashes = extract_turn_hashes([path for path in session_files if path.exists()])
+        if show_progress:
+            self.report_progress(f"Computing the checkpoint summary for '{slug}'...")
         snapshot_hash = sha256_text(
             json.dumps(
                 {
@@ -539,6 +578,8 @@ class ClientService:
     def flush_outbound_queue(self, api: ApiClient | None = None) -> None:
         client = api or self.api_client()
         queue = self.state_store.load_queue()
+        if queue:
+            self.report_progress(f"Retrying {len(queue)} queued checkpoint(s)...")
         remaining: list[OutboundQueueItem] = []
         for item in queue:
             try:
@@ -581,11 +622,13 @@ class ClientService:
 
     def turn_on_sync(self, slug: str, *, steal: bool = False) -> str:
         local_state = self._get_superproject_state(slug)
+        self.report_progress(f"Checking whether '{slug}' is aligned with the server...")
         diff = self.compare_with_server(slug)
         if diff.has_mismatch and local_state.last_alignment_action == AlignmentAction.NONE:
             raise RuntimeError(
                 "Local state does not match the server. Run update-from-server or override-current-state first."
             )
+        self.report_progress("Acquiring the global live-sync lease from the server...")
         lease = self.api_client().acquire_lease(steal=steal)
         if not lease.granted:
             raise RuntimeError(
@@ -596,6 +639,7 @@ class ClientService:
         self.save_config(config)
         self.worker = SyncWorker(self, slug)
         self.worker.start()
+        self.report_progress(f"Live sync started for '{slug}'.")
         return slug
 
     def turn_off_sync(self) -> None:

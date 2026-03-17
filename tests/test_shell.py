@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cws.cli import run_shell_command
+from cws.cli import run_shell_command, service
 from cws.shell import CWSShell
 
 
@@ -50,3 +50,17 @@ def test_run_shell_command_keeps_flagged_superproject_compatibility(capsys) -> N
     captured = capsys.readouterr()
     assert service.calls == [("update_from_server", ("telegram-bots-suite",))]
     assert '"new_on_server": []' in captured.out
+
+
+def test_cli_service_factory_wires_progress_callback(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeClientService:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("cws.cli.ClientService", _FakeClientService)
+
+    service()
+
+    assert callable(captured["progress_callback"])

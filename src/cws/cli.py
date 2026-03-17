@@ -19,8 +19,13 @@ app = typer.Typer(
 )
 
 
+def emit_progress(message: str) -> None:
+    timestamp = time.strftime("%H:%M:%S")
+    typer.secho(f"[cws {timestamp}] {message}", fg=typer.colors.CYAN)
+
+
 def service() -> ClientService:
-    return ClientService()
+    return ClientService(progress_callback=emit_progress)
 
 
 def enrollment_log_file() -> Path:
