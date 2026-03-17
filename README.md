@@ -2,6 +2,8 @@
 
 `codex-workspace-sync` is a Python monorepo for keeping Codex workspace context portable across multiple Windows devices with a self-hosted sync hub.
 
+> Status: experimental alpha. This project is usable for a single operator who is comfortable with SSH, self-hosting, and recovering from upstream Codex format changes. It is not production-grade sync middleware yet.
+
 The repo contains:
 
 - a Windows-first client CLI and shell
@@ -19,6 +21,23 @@ The repo contains:
 - Raw Codex artifacts are synced for resume fidelity.
 - Normalized checkpoints and manifests are synced for validation and recovery.
 - Suspicious deletes and destructive Markdown drift are quarantined instead of auto-propagated.
+
+## Current status
+
+- The current target setup is one person, multiple Windows machines, and one self-hosted Linux server.
+- The sync model is designed for one active live-sync device at a time.
+- The repo is intended to be transparent and hackable rather than fully automated or consumer-friendly.
+- The codebase currently has automated tests, but the operational workflow still assumes a technically comfortable operator.
+
+## Known limitations
+
+- The project depends on Codex local state under `~/.codex`, including session files and index metadata that are not stable public APIs.
+- Exact thread portability depends on Codex and VS Code continuing to store compatible local artifacts across devices and versions.
+- Server-side synced payloads are stored in plaintext by design in v1.
+- The system is optimized for a single user, not concurrent multi-user collaboration.
+- Enrollment, device recovery, and server updates still involve manual operator steps.
+- Windows client workflows and a Linux self-hosted server are the primary supported environment today.
+- If upstream Codex changes its local file layout or thread metadata shape, parts of this project may need repairs.
 
 ## Repo layout
 
@@ -51,6 +70,13 @@ During enrollment:
 - `Secondary passphrase` means the passphrase you set with `cws-server init` on the server.
 - `SSH password` means the Linux account password and can be left blank for key-based SSH.
 - `SSH key passphrase` means the passphrase that unlocks your local private key.
+
+## Security notes
+
+- The server is authoritative, so anyone with server access effectively has access to synced Codex state.
+- Synced raw bundles can contain conversation history, local thread metadata, and synced skills.
+- Payload encryption is intentionally out of scope for the current alpha, but the storage model was kept modular so encryption can be added later.
+- Do not expose the sync API publicly without normal server hardening, firewall rules, and SSH hygiene.
 
 ## Windows repo push helper
 

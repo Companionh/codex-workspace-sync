@@ -15,6 +15,7 @@ from cws.models import (
     ManagedDocument,
     ManagedFileClass,
     ManagedFileRecord,
+    OutboundQueueItem,
     PullStateResponse,
     PushCheckpointResponse,
     RawFileArtifact,
@@ -480,7 +481,7 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
 
         def heartbeat(self):
             self.heartbeat_calls += 1
-            return _FakeHeartbeat(self.heartbeat_calls < 5)
+            return _FakeHeartbeat(self.heartbeat_calls < 10)
 
         def push_checkpoint(self, slug, request):
             self.pushes.append((slug, request))
@@ -546,8 +547,8 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         def api_client(self):
             return self.api
 
-        def flush_outbound_queue(self, _api):
-            return None
+        def flush_outbound_queue(self, _api, *, heartbeat=None):
+            return True
 
         def prepare_live_checkpoint_inputs(self, _slug, *, show_progress):
             assert show_progress is False
@@ -590,6 +591,66 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         "Server updated for 'telegram-bots-suite' at revision 7 for thread(s): thread-a.",
         "Live sync stopped because this device no longer owns the active lease.",
     ]
+
+
+def test_flush_outbound_queue_heartbeats_between_retry_pushes(tmp_path) -> None:
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    checkpoint = ThreadCheckpoint(
+        superproject_slug="telegram-bots-suite",
+        thread_id="thread-a",
+        revision=0,
+        created_at=utc_now(),
+        source_device_id="device-a",
+        canonical=True,
+        base_revision=0,
+        turn_hashes=[],
+        summary="checkpoint",
+        manifest=SuperprojectManifest(
+            slug="telegram-bots-suite",
+            name="telegram-bots-suite",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            managed_files=[],
+        ),
+        managed_documents=[],
+        raw_bundle=None,
+        snapshot_hash="snapshot-a",
+    )
+    queue = [
+        OutboundQueueItem(
+            superproject_slug="telegram-bots-suite",
+            created_at=utc_now(),
+            checkpoint=checkpoint,
+        ),
+        OutboundQueueItem(
+            superproject_slug="telegram-bots-suite",
+            created_at=utc_now(),
+            checkpoint=checkpoint.model_copy(update={"checkpoint_id": "checkpoint-b", "snapshot_hash": "snapshot-b"}),
+        ),
+    ]
+    state_store.save_queue(queue)
+
+    class _QueueApi:
+        def __init__(self) -> None:
+            self.pushes = 0
+
+        def push_checkpoint(self, _slug, _request):
+            self.pushes += 1
+            return PushCheckpointResponse(accepted=True, revision=7)
+
+    heartbeat_calls: list[int] = []
+
+    def heartbeat(_api) -> bool:
+        heartbeat_calls.append(1)
+        return True
+
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+
+    success = service.flush_outbound_queue(_QueueApi(), heartbeat=heartbeat)
+
+    assert success is True
+    assert heartbeat_calls == [1, 1, 1, 1]
+    assert state_store.load_queue() == []
 
 
 def test_update_from_server_reports_progress_steps(tmp_path) -> None:

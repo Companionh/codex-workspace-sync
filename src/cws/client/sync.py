@@ -74,7 +74,10 @@ class SyncWorker(threading.Thread):
     def run(self) -> None:  # pragma: no cover - exercised by integration flow
         api = self.service.api_client()
         while not self.stop_event.is_set():
-            self.service.flush_outbound_queue(api)
+            if not self._heartbeat(api):
+                return
+            if not self.service.flush_outbound_queue(api, heartbeat=self._heartbeat):
+                return
             if not self._heartbeat(api):
                 return
             try:
@@ -97,6 +100,8 @@ class SyncWorker(threading.Thread):
                 time.sleep(self.service.heartbeat_interval_seconds)
                 continue
             for checkpoint in checkpoints:
+                if not self._heartbeat(api):
+                    return
                 key = checkpoint.thread_id or "__docs__"
                 if checkpoint.snapshot_hash == self.last_pushed_hashes.get(key):
                     continue
@@ -120,11 +125,15 @@ class SyncWorker(threading.Thread):
                             self.superproject_slug,
                             PushCheckpointRequest(checkpoint=checkpoint),
                         )
+                        if not self._heartbeat(api):
+                            return
                         self.last_pushed_hashes[key] = checkpoint.snapshot_hash
                         self.service.report_progress(
                             f"Server updated for '{self.superproject_slug}' at revision {response.revision} for thread(s): {thread_labels}."
                         )
                     except Exception:
+                        if not self._heartbeat(api):
+                            return
                         self.service.report_progress(
                             f"Server push failed for '{self.superproject_slug}'. Queueing the checkpoint for retry."
                         )
@@ -138,6 +147,8 @@ class SyncWorker(threading.Thread):
                         self.superproject_slug,
                         PushCheckpointRequest(checkpoint=scratch),
                     )
+                    if not self._heartbeat(api):
+                        return
                 except Exception:
                     pass
                 self.pending_checkpoints[key] = checkpoint
@@ -947,13 +958,22 @@ class ClientService:
         )
         self.state_store.save_queue(queue)
 
-    def flush_outbound_queue(self, api: ApiClient | None = None) -> None:
+    def flush_outbound_queue(
+        self,
+        api: ApiClient | None = None,
+        *,
+        heartbeat: Callable[[ApiClient], bool] | None = None,
+    ) -> bool:
         client = api or self.api_client()
         queue = self.state_store.load_queue()
         if queue:
             self.report_progress(f"Retrying {len(queue)} queued checkpoint(s)...")
         remaining: list[OutboundQueueItem] = []
-        for item in queue:
+        for index, item in enumerate(queue):
+            if heartbeat is not None and not heartbeat(client):
+                remaining.extend(queue[index:])
+                self.state_store.save_queue(remaining)
+                return False
             try:
                 client.push_checkpoint(
                     item.superproject_slug,
@@ -961,7 +981,12 @@ class ClientService:
                 )
             except Exception:
                 remaining.append(item)
+            if heartbeat is not None and not heartbeat(client):
+                remaining.extend(queue[index + 1 :])
+                self.state_store.save_queue(remaining)
+                return False
         self.state_store.save_queue(remaining)
+        return True
 
     def override_current_state(
         self,
