@@ -18,6 +18,7 @@ from cws.models import (
     PushCheckpointRequest,
     PushCheckpointResponse,
     ResolveMismatchRequest,
+    SuperprojectManifest,
 )
 from cws.server.service import ServerService
 
@@ -106,6 +107,18 @@ def create_app() -> FastAPI:
             return service.pull_state(slug)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/superprojects/{slug}/manifest", response_model=dict[str, SuperprojectManifest])
+    def get_manifest(
+        slug: str,
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> dict[str, SuperprojectManifest]:
+        try:
+            manifest = service.get_manifest(slug)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"manifest": manifest}
 
     @app.post("/api/superprojects/{slug}/checkpoints", response_model=PushCheckpointResponse)
     def push_checkpoint(

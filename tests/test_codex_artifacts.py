@@ -27,7 +27,10 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
     session_dir.mkdir(parents=True)
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
+    unrelated_root = tmp_path / "other-workspace"
+    unrelated_root.mkdir()
     session_path = session_dir / "rollout-abc.jsonl"
+    session_path_two = session_dir / "rollout-def.jsonl"
     lines = [
         json.dumps(
             {
@@ -49,17 +52,45 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
         ),
     ]
     session_path.write_text("\n".join(lines), encoding="utf-8")
+    session_path_two.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "thread-2",
+                            "cwd": str(unrelated_root),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "hello again",
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    session_path_two.touch()
     (codex_root / "session_index.jsonl").write_text(
         json.dumps({"id": "thread-1", "thread_name": "demo"}),
         encoding="utf-8",
     )
 
     bundle = build_raw_session_bundle(codex_root, [workspace_root])
-    hashes = extract_turn_hashes([session_path])
+    hashes = extract_turn_hashes([session_path, session_path_two])
 
-    assert bundle.thread_id == "thread-1"
+    assert bundle.thread_id == "thread-2"
+    assert bundle.session_ids == ["thread-1", "thread-2"]
     assert any(artifact.relative_path.endswith("rollout-abc.jsonl") for artifact in bundle.files)
-    assert len(hashes) == 1
+    assert any(artifact.relative_path.endswith("rollout-def.jsonl") for artifact in bundle.files)
+    assert len(hashes) == 2
 
 
 def test_atomic_write_bytes_retries_transient_permission_error(monkeypatch, tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ from cws.models import (
     PullStateResponse,
     PushCheckpointRequest,
     PushCheckpointResponse,
+    SuperprojectManifest,
     ThreadCheckpoint,
 )
 
@@ -24,6 +26,14 @@ class ApiClient:
         self.server_url = server_url.rstrip("/")
         self.device_id = device_id
         self.device_secret = device_secret
+        timeout_seconds = float(os.environ.get("CWS_HTTP_TIMEOUT_SECONDS", "300"))
+        self.timeout = httpx.Timeout(
+            timeout_seconds,
+            connect=min(30.0, timeout_seconds),
+            read=timeout_seconds,
+            write=timeout_seconds,
+            pool=timeout_seconds,
+        )
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -36,7 +46,7 @@ class ApiClient:
             method,
             f"{self.server_url}{path}",
             headers=self._headers(),
-            timeout=30.0,
+            timeout=self.timeout,
             **kwargs,
         )
         response.raise_for_status()
@@ -64,6 +74,15 @@ class ApiClient:
     def pull_state(self, slug: str) -> PullStateResponse:
         response = self._request("GET", f"/api/superprojects/{slug}/state")
         return PullStateResponse.model_validate(response.json())
+
+    def get_manifest(self, slug: str) -> SuperprojectManifest:
+        try:
+            response = self._request("GET", f"/api/superprojects/{slug}/manifest")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            return self.pull_state(slug).manifest
+        return SuperprojectManifest.model_validate(response.json()["manifest"])
 
     def push_checkpoint(self, slug: str, request: PushCheckpointRequest) -> PushCheckpointResponse:
         response = self._request(

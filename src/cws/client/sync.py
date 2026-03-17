@@ -475,14 +475,20 @@ class ClientService:
             return "shared Codex runtime files"
         return ", ".join(labels)
 
+    @staticmethod
+    def _load_manifest(api_client: Any, slug: str):
+        if hasattr(api_client, "get_manifest"):
+            return api_client.get_manifest(slug)
+        return api_client.pull_state(slug).manifest
+
     def compare_with_server(self, slug: str) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
         managed_root = Path(local_state.managed_root)
-        state = self.api_client().pull_state(slug)
         local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
-        server_by_path = {document.record.relative_path: document.record for document in state.managed_documents}
+        manifest = self._load_manifest(self.api_client(), slug)
+        server_by_path = {record.relative_path: record for record in manifest.managed_files}
         local_by_path = {document.record.relative_path: document.record for document in local_documents}
         new_on_server = sorted(set(server_by_path) - set(local_by_path))
         new_local = sorted(set(local_by_path) - set(server_by_path))
@@ -501,7 +507,21 @@ class ClientService:
         managed_root = Path(local_state.managed_root)
         server_state = self.api_client().pull_state(slug)
         self.report_progress(f"Comparing local Markdown for '{slug}' with the server copy...")
-        diff = self.compare_with_server(slug)
+        server_by_path = {
+            document.record.relative_path: document.record
+            for document in server_state.managed_documents
+        }
+        local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
+        local_by_path = {document.record.relative_path: document.record for document in local_documents}
+        diff = DiffSummary(
+            new_on_server=sorted(set(server_by_path) - set(local_by_path)),
+            new_local=sorted(set(local_by_path) - set(server_by_path)),
+            changed=sorted(
+                path
+                for path in set(server_by_path) & set(local_by_path)
+                if server_by_path[path].sha256 != local_by_path[path].sha256
+            ),
+        )
         if diff.has_mismatch and not assume_yes:
             message = (
                 "Server has updates. Apply them now? "
@@ -600,7 +620,7 @@ class ClientService:
         self.save_config(config)
         if show_progress:
             self.report_progress(f"Loading the current server manifest for '{slug}'...")
-        manifest = self.api_client().pull_state(slug).manifest
+        manifest = self._load_manifest(self.api_client(), slug)
         incoming_manifest = manifest.model_copy(
             update={
                 "managed_files": [document.record for document in documents],

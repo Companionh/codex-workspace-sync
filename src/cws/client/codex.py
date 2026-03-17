@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from uuid import uuid4
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 from cws.models import (
     ManagedDocument,
@@ -65,24 +65,26 @@ def build_managed_documents(
 
 def _matching_session_files(codex_root: Path, workspace_roots: list[Path]) -> tuple[list[Path], list[str]]:
     sessions_root = codex_root / "sessions"
-    matched_files: list[Path] = []
-    matched_session_ids: list[str] = []
     if not sessions_root.exists():
-        return matched_files, matched_session_ids
-    for path in sorted(sessions_root.rglob("*.jsonl")):
+        return [], []
+
+    session_entries: list[tuple[float, str, Path, str]] = []
+    for path in sessions_root.rglob("*.jsonl"):
         try:
             first_line = path.read_text(encoding="utf-8").splitlines()[0]
             payload = json.loads(first_line)
         except Exception:
             continue
-        cwd = payload.get("payload", {}).get("cwd")
         session_id = payload.get("payload", {}).get("id")
-        if not cwd or not session_id:
+        if not session_id:
             continue
-        cwd_path = Path(cwd)
-        if any(is_relative_to(cwd_path, root) or is_relative_to(root, cwd_path) for root in workspace_roots):
-            matched_files.append(path)
-            matched_session_ids.append(session_id)
+        # Session sync is whole-machine by design. Workspace roots still matter for
+        # managed Markdown ownership, but Codex history should follow the device.
+        session_entries.append((path.stat().st_mtime, str(path).lower(), path, session_id))
+
+    session_entries.sort(key=lambda item: (item[0], item[1]))
+    matched_files = [path for _, _, path, _ in session_entries]
+    matched_session_ids = [session_id for _, _, _, session_id in session_entries]
     return matched_files, matched_session_ids
 
 
