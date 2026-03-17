@@ -119,16 +119,6 @@ if errorlevel 1 (
 )
 
 pushd "%PUBLISH_CHECKOUT%" >nul
-echo.
-echo Current git status:
-"%GIT_EXE%" status --short
-if errorlevel 1 (
-  echo git status failed.
-  popd >nul
-  popd >nul
-  goto :error_exit
-)
-
 "%GIT_EXE%" add -A
 if errorlevel 1 (
   echo git add failed.
@@ -143,6 +133,16 @@ if not errorlevel 1 (
   popd >nul
   popd >nul
   goto :success_exit
+)
+
+echo.
+echo Current publish diff:
+"%GIT_EXE%" diff --cached --name-status
+if errorlevel 1 (
+  echo git diff --cached failed.
+  popd >nul
+  popd >nul
+  goto :error_exit
 )
 
 set "COMMIT_MSG=%~1"
