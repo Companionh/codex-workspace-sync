@@ -119,7 +119,7 @@ if errorlevel 1 (
 )
 
 pushd "%PUBLISH_CHECKOUT%" >nul
-"%GIT_EXE%" add -A
+"%GIT_EXE%" add -A >nul 2>nul
 if errorlevel 1 (
   echo git add failed.
   popd >nul
