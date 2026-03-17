@@ -15,6 +15,9 @@ if not defined GIT_EXE set "GIT_EXE=C:\Program Files\Git\cmd\git.exe"
 if not defined PYTHON_EXE set "PYTHON_EXE=python"
 if not defined PUBLISH_CHECKOUT set "PUBLISH_CHECKOUT=%DEFAULT_PUBLISH_CHECKOUT%"
 if not defined GITHUB_BRANCH set "GITHUB_BRANCH=main"
+if not defined GITHUB_REMOTE set "GITHUB_REMOTE=origin"
+if not defined SYNC_WORKING_BRANCH_AFTER_PUSH set "SYNC_WORKING_BRANCH_AFTER_PUSH=true"
+if not defined WORKING_BRANCH_BACKUP_PREFIX set "WORKING_BRANCH_BACKUP_PREFIX=backup/post_publish_"
 
 "%GIT_EXE%" --version >nul 2>nul
 if errorlevel 1 (
@@ -136,6 +139,8 @@ if not errorlevel 1 (
       popd >nul
       goto :error_exit
     )
+    "%GIT_EXE%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" HEAD >nul 2>nul
+    call :sync_working_checkout
     echo.
     echo Push successful. Latest commit:
     "%GIT_EXE%" log --oneline -1
@@ -198,6 +203,8 @@ if errorlevel 1 (
   popd >nul
   goto :error_exit
 )
+"%GIT_EXE%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" HEAD >nul 2>nul
+call :sync_working_checkout
 
 echo.
 echo Push successful. Latest commit:
@@ -206,6 +213,55 @@ echo Push successful. Latest commit:
 popd >nul
 popd >nul
 goto :success_exit
+
+:sync_working_checkout
+if /I not "%SYNC_WORKING_BRANCH_AFTER_PUSH%"=="true" goto :eof
+
+for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" branch --show-current 2^>nul') do set "WORKING_BRANCH=%%I"
+if not defined WORKING_BRANCH goto :eof
+if /I not "%WORKING_BRANCH%"=="%GITHUB_BRANCH%" (
+  echo.
+  echo Skipping working checkout sync because the current branch is %WORKING_BRANCH%, not %GITHUB_BRANCH%.
+  goto :eof
+)
+
+"%GIT_EXE%" -C "%REPO_ROOT%" fetch "%PUBLISH_CHECKOUT%" "%GITHUB_BRANCH%" >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo Warning: failed to fetch the published branch back into the working checkout.
+  goto :eof
+)
+
+for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-parse HEAD 2^>nul') do set "WORKING_HEAD=%%I"
+for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-parse FETCH_HEAD 2^>nul') do set "PUBLISHED_HEAD=%%I"
+if not defined WORKING_HEAD goto :eof
+if not defined PUBLISHED_HEAD goto :eof
+if /I "%WORKING_HEAD%"=="%PUBLISHED_HEAD%" (
+  "%GIT_EXE%" -C "%REPO_ROOT%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" FETCH_HEAD >nul 2>nul
+  goto :eof
+)
+
+for /f "delims=" %%I in ('powershell -NoProfile -Command "(Get-Date).ToUniversalTime().ToString(\"yyyyMMdd_HHmmss\")"') do set "SYNC_BACKUP_STAMP=%%I"
+if not defined SYNC_BACKUP_STAMP set "SYNC_BACKUP_STAMP=%RANDOM%%RANDOM%"
+set "SYNC_BACKUP_BRANCH=%WORKING_BRANCH_BACKUP_PREFIX%%SYNC_BACKUP_STAMP%"
+
+echo.
+echo Creating working-branch safety backup: %SYNC_BACKUP_BRANCH%
+"%GIT_EXE%" -C "%REPO_ROOT%" branch "%SYNC_BACKUP_BRANCH%" HEAD >nul 2>nul
+if errorlevel 1 (
+  echo Warning: failed to create a working-branch backup. Leaving the working checkout unchanged.
+  goto :eof
+)
+
+echo Syncing the working checkout to the published branch...
+"%GIT_EXE%" -C "%REPO_ROOT%" reset --hard FETCH_HEAD >nul 2>nul
+if errorlevel 1 (
+  echo Warning: failed to realign the working checkout after publish.
+  goto :eof
+)
+"%GIT_EXE%" -C "%REPO_ROOT%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" FETCH_HEAD >nul 2>nul
+echo Working checkout is now aligned to the published commit.
+goto :eof
 
 :error_exit
 if "%CWS_PAUSE_ON_ERROR%"=="1" pause

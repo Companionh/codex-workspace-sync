@@ -18,6 +18,9 @@ rem set "REFRESH_INSTALL=true"
 rem set "RUN_COMPILE_CHECK=true"
 rem set "REBASE_ON_DIVERGENCE=prompt"
 rem set "RESET_ON_DIVERGENCE=prompt"
+rem Optional: after a successful publish, sync the working branch to the published mirror.
+rem set "SYNC_WORKING_BRANCH_AFTER_PUSH=true"
+rem set "WORKING_BRANCH_BACKUP_PREFIX=backup/post_publish_"
 rem Optional: window behavior for the Windows batch helpers.
 rem set "CWS_PAUSE_ON_ERROR=1"
 rem set "CWS_PAUSE_ON_SUCCESS=1"
