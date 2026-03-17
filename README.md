@@ -115,14 +115,16 @@ They install:
 - `cws enroll-device`
 - `cws create-superproject`
 - `cws attach-superproject`
-- `cws disconnect-superproject --superproject <slug>`
-- `cws delete-superproject-server --superproject <slug> [--force]`
-- `cws update-from-server --superproject <slug>`
-- `cws override-current-state --superproject <slug>`
-- `cws turn-on-sync --superproject <slug>`
+- `cws disconnect-superproject <slug>`
+- `cws delete-superproject-server <slug> [--force]`
+- `cws update-from-server <slug>`
+- `cws override-current-state <slug>`
+- `cws turn-on-sync <slug>`
 - `cws turn-off-sync`
 - `cws status`
-- `cws refresh-thread --superproject <slug> --thread <thread-id>`
+- `cws refresh-thread <slug> --thread <thread-id>`
+
+The older `--superproject <slug>` form still works, but the positional form is now the default.
 
 ## Notes
 

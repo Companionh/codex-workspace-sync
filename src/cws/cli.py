@@ -127,6 +127,43 @@ def attach_superproject_interactive(client: ClientService) -> None:
     typer.echo(json.dumps(diff.__dict__, indent=2))
 
 
+def _positional_args(args: list[str]) -> list[str]:
+    values: list[str] = []
+    skip_next = False
+    for index, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.startswith("--"):
+            if index + 1 < len(args) and not args[index + 1].startswith("--"):
+                skip_next = True
+            continue
+        values.append(arg)
+    return values
+
+
+def _resolve_shell_superproject(args: list[str]) -> str:
+    if "--superproject" in args:
+        index = args.index("--superproject")
+        if index + 1 < len(args):
+            return args[index + 1]
+        raise RuntimeError("Missing value for --superproject")
+    positional = _positional_args(args)
+    if positional:
+        return positional[0]
+    raise RuntimeError("Missing superproject slug")
+
+
+def _resolve_cli_superproject(
+    positional_superproject: str | None,
+    option_superproject: str | None,
+) -> str:
+    slug = option_superproject or positional_superproject
+    if slug:
+        return slug
+    raise typer.BadParameter("Missing superproject slug.")
+
+
 def run_shell_command(client: ClientService, command: str, args: list[str]) -> None:
     def arg_value(name: str, *, required: bool = True) -> str | None:
         if name in args:
@@ -138,28 +175,28 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         return None
 
     if command == "update-from-server":
-        slug = arg_value("--superproject")
+        slug = _resolve_shell_superproject(args)
         diff = client.update_from_server(slug)
         typer.echo(json.dumps(diff.__dict__, indent=2))
         return
     if command == "override-current-state":
-        slug = arg_value("--superproject")
+        slug = _resolve_shell_superproject(args)
         thread_id = arg_value("--thread", required=False)
         checkpoint = client.override_current_state(slug, thread_id=thread_id)
         typer.echo(f"Override pushed for {checkpoint.superproject_slug} at revision {checkpoint.base_revision + 1}.")
         return
     if command == "refresh-thread":
-        slug = arg_value("--superproject")
+        slug = _resolve_shell_superproject(args)
         thread_id = arg_value("--thread")
         client.refresh_thread(slug, thread_id)
         typer.echo("Thread refresh payload applied locally. Reopen the thread in VS Code.")
         return
     if command == "disconnect-superproject":
-        slug = arg_value("--superproject")
+        slug = _resolve_shell_superproject(args)
         typer.echo(json.dumps(client.disconnect_superproject(slug), indent=2))
         return
     if command == "delete-superproject-server":
-        slug = arg_value("--superproject")
+        slug = _resolve_shell_superproject(args)
         force = "--force" in args
         if not typer.confirm(
             f"Delete superproject '{slug}' from the server and erase its server-side state?",
@@ -169,7 +206,7 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         typer.echo(json.dumps(client.delete_superproject_from_server(slug, force=force), indent=2))
         return
     if command == "turn-on-sync":
-        slug = arg_value("--superproject")
+        slug = _resolve_shell_superproject(args)
         try:
             client.turn_on_sync(slug)
             typer.echo(f"Live sync is active for '{slug}'.")
@@ -233,42 +270,58 @@ def attach_superproject() -> None:
 
 
 @app.command("disconnect-superproject")
-def disconnect_superproject(superproject: str = typer.Option(..., "--superproject")) -> None:
-    typer.echo(json.dumps(service().disconnect_superproject(superproject), indent=2))
+def disconnect_superproject(
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps(service().disconnect_superproject(slug), indent=2))
 
 
 @app.command("delete-superproject-server")
 def delete_superproject_server(
-    superproject: str = typer.Option(..., "--superproject"),
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
     force: bool = typer.Option(False, "--force"),
 ) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
     if not typer.confirm(
-        f"Delete superproject '{superproject}' from the server and erase its server-side state?",
+        f"Delete superproject '{slug}' from the server and erase its server-side state?",
         default=False,
     ):
         raise typer.Exit(code=1)
-    typer.echo(json.dumps(service().delete_superproject_from_server(superproject, force=force), indent=2))
+    typer.echo(json.dumps(service().delete_superproject_from_server(slug, force=force), indent=2))
 
 
 @app.command("update-from-server")
-def update_from_server(superproject: str = typer.Option(..., "--superproject")) -> None:
-    diff = service().update_from_server(superproject)
+def update_from_server(
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    diff = service().update_from_server(slug)
     typer.echo(json.dumps(diff.__dict__, indent=2))
 
 
 @app.command("override-current-state")
 def override_current_state(
-    superproject: str = typer.Option(..., "--superproject"),
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
     thread: str | None = typer.Option(None, "--thread"),
 ) -> None:
-    checkpoint = service().override_current_state(superproject, thread_id=thread)
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    checkpoint = service().override_current_state(slug, thread_id=thread)
     typer.echo(f"Override pushed for {checkpoint.superproject_slug}.")
 
 
 @app.command("turn-on-sync")
-def turn_on_sync(superproject: str = typer.Option(..., "--superproject")) -> None:
+def turn_on_sync(
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
     client = service()
-    run_shell_command(client, "turn-on-sync", ["--superproject", superproject])
+    run_shell_command(client, "turn-on-sync", [slug])
     while True:
         try:
             typer.echo("Sync worker running. Press Ctrl+C to stop.")
@@ -286,8 +339,10 @@ def turn_off_sync() -> None:
 
 @app.command("refresh-thread")
 def refresh_thread(
-    superproject: str = typer.Option(..., "--superproject"),
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
     thread: str = typer.Option(..., "--thread"),
 ) -> None:
-    service().refresh_thread(superproject, thread)
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    service().refresh_thread(slug, thread)
     typer.echo("Thread refresh payload applied locally. Reopen the thread in VS Code.")
