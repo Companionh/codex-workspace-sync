@@ -62,6 +62,7 @@ Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.
 - It assumes Git authentication is already configured on the machine, preferably with SSH.
 - The temp checkout keeps `origin` on the normal repo URL and uses plain `git clone`, `git fetch`, and `git push`.
 - It copies `user.name` and `user.email` from your main checkout into the temp publish checkout when available.
+- Before publishing, it warns if the working branch is behind the latest published branch and uses a stronger warning when the working branch has diverged from it.
 - After a successful publish, it can realign the main working branch to the published mirror and create a `backup/post_publish_*` safety branch first.
 - It pauses at the end when launched by double-click so you can read the output.
 - The local config file is ignored by Git.

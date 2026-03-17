@@ -55,6 +55,8 @@ Enrollment only registers the device and stores its credentials. It does not aut
 
 The script exports only the tracked project tree needed for GitHub publishing into a temp checkout under `backups/push_tmp_repo`, then commits and pushes from there. Local runtime state, secrets, caches, and server backups are excluded from the export. Git authentication should already be configured on the Windows machine, ideally through SSH. The helper copies `user.name` and `user.email` from the main repo checkout when available, and you can override them in `push-config.local.cmd` with `GIT_USER_NAME` and `GIT_USER_EMAIL`.
 
+Before it creates a publish commit, it checks the main working branch against the publish mirror. If the working branch is only behind, it warns and asks for confirmation. If the histories are desynced or diverged, it shows a stronger warning and asks again before continuing.
+
 To reduce future Git-history drift, the pusher can also sync the main working branch to the published mirror after a successful push. When enabled, it creates a `backup/post_publish_*` safety branch before resetting the working branch to the just-published commit.
 
 ## Updating code on Windows

@@ -93,6 +93,13 @@ if defined GIT_USER_NAME "%GIT_EXE%" config user.name "%GIT_USER_NAME%"
 if defined GIT_USER_EMAIL "%GIT_EXE%" config user.email "%GIT_USER_EMAIL%"
 popd >nul
 
+call :confirm_publish_alignment
+if errorlevel 1 (
+  echo Publish cancelled.
+  popd >nul
+  goto :success_exit
+)
+
 echo Exporting curated project tree into publish checkout...
 "%PYTHON_EXE%" "%EXPORT_TOOL%" --dest "%PUBLISH_CHECKOUT%"
 if errorlevel 1 (
@@ -213,6 +220,49 @@ echo Push successful. Latest commit:
 popd >nul
 popd >nul
 goto :success_exit
+
+:confirm_publish_alignment
+for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" branch --show-current 2^>nul') do set "WORKING_BRANCH=%%I"
+if not defined WORKING_BRANCH goto :eof
+if /I not "%WORKING_BRANCH%"=="%GITHUB_BRANCH%" goto :eof
+
+"%GIT_EXE%" -C "%REPO_ROOT%" fetch "%PUBLISH_CHECKOUT%" "%GITHUB_BRANCH%" >nul 2>nul
+if errorlevel 1 goto :eof
+
+set "WORKING_AHEAD_COUNT="
+set "WORKING_BEHIND_COUNT="
+for /f "tokens=1,2" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-list --left-right --count HEAD...FETCH_HEAD 2^>nul') do (
+  set "WORKING_AHEAD_COUNT=%%I"
+  set "WORKING_BEHIND_COUNT=%%J"
+)
+if not defined WORKING_AHEAD_COUNT set "WORKING_AHEAD_COUNT=0"
+if not defined WORKING_BEHIND_COUNT set "WORKING_BEHIND_COUNT=0"
+
+if "%WORKING_AHEAD_COUNT%"=="0" if "%WORKING_BEHIND_COUNT%"=="0" goto :eof
+if not "%WORKING_AHEAD_COUNT%"=="0" if not "%WORKING_BEHIND_COUNT%"=="0" goto :warn_desynced
+if "%WORKING_AHEAD_COUNT%"=="0" if not "%WORKING_BEHIND_COUNT%"=="0" goto :warn_behind
+goto :eof
+
+:warn_behind
+echo.
+echo Warning: the working checkout is behind the latest published branch by %WORKING_BEHIND_COUNT% commit^(s^).
+echo Continuing will create a new publish commit from the current working tree and then realign the working branch afterward.
+set "PUBLISH_CONFIRM="
+set /p PUBLISH_CONFIRM=Continue with this publish? [y/N]:
+if /I "%PUBLISH_CONFIRM%"=="y" goto :eof
+if /I "%PUBLISH_CONFIRM%"=="yes" goto :eof
+exit /b 1
+
+:warn_desynced
+echo.
+echo Warning: the working checkout and published branch are desynced.
+echo Local branch is ahead by %WORKING_AHEAD_COUNT% commit^(s^) and behind by %WORKING_BEHIND_COUNT% commit^(s^).
+echo Continuing will publish the current working tree, then realign the working branch and create a safety backup branch first.
+set "PUBLISH_CONFIRM="
+set /p PUBLISH_CONFIRM=Continue with this publish? [y/N]:
+if /I "%PUBLISH_CONFIRM%"=="y" goto :eof
+if /I "%PUBLISH_CONFIRM%"=="yes" goto :eof
+exit /b 1
 
 :sync_working_checkout
 if /I not "%SYNC_WORKING_BRANCH_AFTER_PUSH%"=="true" goto :eof
