@@ -16,6 +16,7 @@ from cws.models import (
     ManagedFileClass,
     ManagedFileRecord,
     PullStateResponse,
+    PushCheckpointResponse,
     RawFileArtifact,
     RawSessionBundle,
     SuperprojectManifest,
@@ -471,6 +472,7 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
 
         def push_checkpoint(self, slug, request):
             self.pushes.append((slug, request))
+            return PushCheckpointResponse(accepted=True, revision=7)
 
     class _FakeService:
         heartbeat_interval_seconds = 0
@@ -548,6 +550,12 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         def mark_sync_inactive(self) -> None:
             self.sync_inactive_marked = True
 
+        def _checkpoint_session_ids(self, checkpoint: ThreadCheckpoint) -> list[str]:
+            return ClientService._checkpoint_session_ids(checkpoint)
+
+        def _format_thread_labels(self, thread_ids: list[str]) -> str:
+            return ClientService._format_thread_labels(thread_ids)
+
     service = _FakeService()
     worker = SyncWorker(service, "telegram-bots-suite")
     worker.run()
@@ -558,6 +566,12 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
     assert request.checkpoint.canonical is True
     assert request.checkpoint.snapshot_hash == "stable-hash"
     assert service.sync_inactive_marked is True
+    assert service.progress_messages == [
+        "Detected a finished Codex turn for 'telegram-bots-suite' in thread(s): thread-a.",
+        "Pushing the latest checkpoint for 'telegram-bots-suite' to the server...",
+        "Server updated for 'telegram-bots-suite' at revision 7 for thread(s): thread-a.",
+        "Live sync stopped because this device no longer owns the active lease.",
+    ]
 
 
 def test_update_from_server_reports_progress_steps(tmp_path) -> None:
@@ -620,6 +634,102 @@ def test_update_from_server_reports_progress_steps(tmp_path) -> None:
         "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
         "Applying server updates for 'telegram-bots-suite'...",
         "Syncing shared skills for 'telegram-bots-suite'...",
+        "Update from server finished for 'telegram-bots-suite'.",
+    ]
+
+
+def test_update_from_server_reports_updated_thread_ids(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    managed_root=str(managed_root),
+                    managed_file_ids={"baseline/base_rules.md": "server-file-id"},
+                )
+            }
+        )
+    )
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    manifest = SuperprojectManifest(
+        slug="telegram-bots-suite",
+        name="telegram-bots-suite",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        revision=6,
+        managed_files=[server_document.record],
+    )
+    thread_checkpoint = ThreadCheckpoint(
+        checkpoint_id="checkpoint-thread-a",
+        superproject_slug="telegram-bots-suite",
+        thread_id="thread-a",
+        revision=6,
+        created_at=utc_now(),
+        source_device_id="device-a",
+        canonical=True,
+        base_revision=5,
+        turn_hashes=["turn-a"],
+        summary="thread-a",
+        manifest=manifest,
+        managed_documents=[server_document],
+        raw_bundle=RawSessionBundle(
+            bundle_id="bundle-thread-a",
+            captured_at=utc_now(),
+            thread_id="thread-a",
+            session_ids=["thread-a", "thread-b", "thread-a"],
+            files=[
+                RawFileArtifact(
+                    relative_path="sessions/2026/03/17/thread-a.jsonl",
+                    sha256="session-a",
+                    content_b64=encode_b64(b"thread-a-session"),
+                )
+            ],
+        ),
+        snapshot_hash="snapshot-thread-a",
+    )
+    server_state = PullStateResponse(
+        manifest=manifest,
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=thread_checkpoint,
+        thread_checkpoints=[thread_checkpoint],
+        pending_resolutions=[],
+    )
+    progress_messages: list[str] = []
+    service = ClientService(
+        state_store=state_store,
+        codex_root=tmp_path / ".codex",
+        progress_callback=progress_messages.append,
+    )
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    service.update_from_server("telegram-bots-suite", assume_yes=True)
+
+    assert progress_messages == [
+        "Connecting to the server for 'telegram-bots-suite'...",
+        "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
+        "Applying server updates for 'telegram-bots-suite'...",
+        "Syncing shared skills for 'telegram-bots-suite'...",
+        "Applying the latest Codex session bundle for 'telegram-bots-suite'...",
+        "Updated Codex thread(s) for 'telegram-bots-suite': thread-a, thread-b.",
         "Update from server finished for 'telegram-bots-suite'.",
     ]
 

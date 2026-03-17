@@ -83,17 +83,23 @@ class SyncWorker(threading.Thread):
             if self.pending_checkpoint is None:
                 self.pending_checkpoint = checkpoint
             elif self.pending_checkpoint.snapshot_hash == checkpoint.snapshot_hash:
+                thread_labels = self.service._format_thread_labels(
+                    self.service._checkpoint_session_ids(checkpoint)
+                )
                 try:
+                    self.service.report_progress(
+                        f"Detected a finished Codex turn for '{self.superproject_slug}' in thread(s): {thread_labels}."
+                    )
                     self.service.report_progress(
                         f"Pushing the latest checkpoint for '{self.superproject_slug}' to the server..."
                     )
-                    api.push_checkpoint(
+                    response = api.push_checkpoint(
                         self.superproject_slug,
                         PushCheckpointRequest(checkpoint=checkpoint),
                     )
                     self.last_pushed_hash = checkpoint.snapshot_hash
                     self.service.report_progress(
-                        f"Checkpoint for '{self.superproject_slug}' synced successfully."
+                        f"Server updated for '{self.superproject_slug}' at revision {response.revision} for thread(s): {thread_labels}."
                     )
                 except Exception:
                     self.service.report_progress(
@@ -453,6 +459,22 @@ class ClientService:
             checkpoints_by_id[checkpoint.checkpoint_id] = checkpoint
         return sorted(checkpoints_by_id.values(), key=lambda checkpoint: checkpoint.revision)
 
+    @staticmethod
+    def _checkpoint_session_ids(checkpoint: ThreadCheckpoint) -> list[str]:
+        session_ids: list[str] = []
+        if checkpoint.raw_bundle is not None:
+            session_ids.extend(checkpoint.raw_bundle.session_ids)
+        if checkpoint.thread_id and checkpoint.thread_id not in session_ids:
+            session_ids.append(checkpoint.thread_id)
+        return session_ids
+
+    @classmethod
+    def _format_thread_labels(cls, thread_ids: list[str]) -> str:
+        labels = list(dict.fromkeys(thread_ids))
+        if not labels:
+            return "shared Codex runtime files"
+        return ", ".join(labels)
+
     def compare_with_server(self, slug: str) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
@@ -515,17 +537,22 @@ class ClientService:
                 self.report_progress(
                     f"Applying {len(checkpoints_with_raw_bundles)} Codex session bundles for '{slug}'..."
                 )
+            refreshed_session_ids: list[str] = []
             for checkpoint in checkpoints_with_raw_bundles:
                 self._apply_raw_bundle(checkpoint.raw_bundle)
-                session_ids = list(checkpoint.raw_bundle.session_ids)
-                if checkpoint.thread_id and checkpoint.thread_id not in session_ids:
-                    session_ids.append(checkpoint.thread_id)
+                session_ids = self._checkpoint_session_ids(checkpoint)
+                refreshed_session_ids.extend(session_ids)
                 for session_id in session_ids:
                     current_revision = local_state.pending_thread_refreshes.get(session_id, 0)
                     local_state.pending_thread_refreshes[session_id] = max(
                         current_revision,
                         checkpoint.revision,
                     )
+            thread_labels = self._format_thread_labels(refreshed_session_ids)
+            if refreshed_session_ids:
+                self.report_progress(f"Updated Codex thread(s) for '{slug}': {thread_labels}.")
+            else:
+                self.report_progress(f"Updated {thread_labels} for '{slug}'.")
         local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
         local_state.last_aligned_revision = server_state.manifest.revision
         server_file_ids = {
