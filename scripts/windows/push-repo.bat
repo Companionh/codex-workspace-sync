@@ -85,7 +85,7 @@ if errorlevel 1 (
   popd >nul
   goto :error_exit
 )
-"%GIT_EXE%" checkout -B "%GITHUB_BRANCH%" "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%"
+"%GIT_EXE%" checkout -B "%GITHUB_BRANCH%" "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 (
   echo git checkout failed in publish checkout.
   popd >nul
