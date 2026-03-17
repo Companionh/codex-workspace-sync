@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from cws.client.state import ClientStateStore
-from cws.client.sync import ClientService
+from cws.client.sync import ClientService, SyncWorker
 from cws.config import ClientPaths
 from cws.models import (
     AlignmentAction,
@@ -19,6 +19,7 @@ from cws.models import (
     RawFileArtifact,
     RawSessionBundle,
     SuperprojectManifest,
+    ThreadCheckpoint,
 )
 from cws.utils import encode_b64, utc_now
 
@@ -221,6 +222,342 @@ def test_update_from_server_adopts_server_managed_file_ids(tmp_path) -> None:
     assert diff.changed == ["baseline/base_rules.md"]
     assert updated_state.managed_file_ids["baseline/base_rules.md"] == "server-file-id"
     assert baseline_path.read_text(encoding="utf-8") == "# server\n"
+
+
+def test_update_from_server_applies_latest_checkpoint_per_thread(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    managed_root=str(managed_root),
+                    managed_file_ids={"baseline/base_rules.md": "server-file-id"},
+                    last_alignment_action=AlignmentAction.NONE,
+                )
+            }
+        )
+    )
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    manifest = SuperprojectManifest(
+        slug="telegram-bots-suite",
+        name="telegram-bots-suite",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        revision=8,
+        managed_files=[server_document.record],
+    )
+    explicit_thread_checkpoint = ThreadCheckpoint(
+        checkpoint_id="checkpoint-thread-a",
+        superproject_slug="telegram-bots-suite",
+        thread_id="thread-a",
+        revision=4,
+        created_at=utc_now(),
+        source_device_id="device-a",
+        canonical=True,
+        base_revision=3,
+        turn_hashes=["turn-a"],
+        summary="thread-a",
+        manifest=manifest,
+        managed_documents=[server_document],
+        raw_bundle=RawSessionBundle(
+            bundle_id="bundle-thread-a",
+            captured_at=utc_now(),
+            thread_id="thread-a",
+            session_ids=["thread-a", "thread-b"],
+            files=[
+                RawFileArtifact(
+                    relative_path="sessions/2026/03/17/thread-a.jsonl",
+                    sha256="session-a",
+                    content_b64=encode_b64(b"thread-a-session"),
+                ),
+                RawFileArtifact(
+                    relative_path="session_index.jsonl",
+                    sha256="index-old",
+                    content_b64=encode_b64(b"old-index"),
+                ),
+            ],
+        ),
+        snapshot_hash="snapshot-thread-a",
+    )
+    default_checkpoint = ThreadCheckpoint(
+        checkpoint_id="checkpoint-default",
+        superproject_slug="telegram-bots-suite",
+        thread_id=None,
+        revision=8,
+        created_at=utc_now(),
+        source_device_id="device-b",
+        canonical=True,
+        base_revision=7,
+        turn_hashes=[],
+        summary="default",
+        manifest=manifest,
+        managed_documents=[server_document],
+        raw_bundle=RawSessionBundle(
+            bundle_id="bundle-default",
+            captured_at=utc_now(),
+            thread_id=None,
+            session_ids=[],
+            files=[
+                RawFileArtifact(
+                    relative_path="session_index.jsonl",
+                    sha256="index-new",
+                    content_b64=encode_b64(b"new-index"),
+                )
+            ],
+        ),
+        snapshot_hash="snapshot-default",
+    )
+    server_state = PullStateResponse(
+        manifest=manifest,
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=default_checkpoint,
+        thread_checkpoints=[explicit_thread_checkpoint, default_checkpoint],
+        pending_resolutions=[],
+    )
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    service.update_from_server("telegram-bots-suite", assume_yes=True)
+
+    codex_root = tmp_path / ".codex"
+    updated_state = state_store.load_config().superprojects["telegram-bots-suite"]
+
+    assert (codex_root / "sessions" / "2026" / "03" / "17" / "thread-a.jsonl").read_text(encoding="utf-8") == (
+        "thread-a-session"
+    )
+    assert (codex_root / "session_index.jsonl").read_text(encoding="utf-8") == "new-index"
+    assert updated_state.pending_thread_refreshes["thread-a"] == 4
+    assert updated_state.pending_thread_refreshes["thread-b"] == 4
+
+
+def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypatch, tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            device_id="device-a",
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    managed_root=str(managed_root),
+                    workspace_roots=[str(tmp_path / "workspace")],
+                    managed_file_ids={"baseline/base_rules.md": "server-file-id"},
+                )
+            },
+        )
+    )
+    manifest = SuperprojectManifest(
+        slug="telegram-bots-suite",
+        name="telegram-bots-suite",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        revision=2,
+        managed_files=[
+            ManagedFileRecord(
+                file_id="server-file-id",
+                relative_path="baseline/base_rules.md",
+                sha256="unused",
+                size_bytes=len("# local\n"),
+                line_count=1,
+                classification=ManagedFileClass.PROTECTED,
+            )
+        ],
+    )
+
+    class _ManifestOnlyApiClient:
+        def pull_state(self, _slug: str) -> PullStateResponse:
+            return PullStateResponse(
+                manifest=manifest,
+                latest_checkpoint=None,
+                thread_checkpoints=[],
+                pending_resolutions=[],
+                managed_documents=[],
+                shared_skills=[],
+            )
+
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    service.api_client = lambda: _ManifestOnlyApiClient()  # type: ignore[method-assign]
+
+    raw_bundle_a = RawSessionBundle(
+        captured_at=utc_now(),
+        thread_id="thread-a",
+        session_ids=["thread-a"],
+        files=[
+            RawFileArtifact(
+                relative_path="sessions/2026/03/17/thread-a.jsonl",
+                sha256="session-sha",
+                content_b64=encode_b64(b"thread-a"),
+            ),
+            RawFileArtifact(
+                relative_path="session_index.jsonl",
+                sha256="index-old",
+                content_b64=encode_b64(b"old-index"),
+            ),
+            RawFileArtifact(
+                relative_path="state_5.sqlite-wal",
+                sha256="wal-old",
+                content_b64=encode_b64(b"old-wal"),
+            ),
+        ],
+    )
+    raw_bundle_b = RawSessionBundle(
+        captured_at=utc_now(),
+        thread_id="thread-a",
+        session_ids=["thread-a"],
+        files=[
+            RawFileArtifact(
+                relative_path="sessions/2026/03/17/thread-a.jsonl",
+                sha256="session-sha",
+                content_b64=encode_b64(b"thread-a"),
+            ),
+            RawFileArtifact(
+                relative_path="session_index.jsonl",
+                sha256="index-new",
+                content_b64=encode_b64(b"new-index"),
+            ),
+            RawFileArtifact(
+                relative_path="state_5.sqlite-wal",
+                sha256="wal-new",
+                content_b64=encode_b64(b"new-wal"),
+            ),
+        ],
+    )
+    bundles = iter([raw_bundle_a, raw_bundle_b])
+    monkeypatch.setattr("cws.client.sync.build_raw_session_bundle", lambda *_args, **_kwargs: next(bundles))
+
+    checkpoint_a = service.build_checkpoint("telegram-bots-suite", canonical=True, show_progress=False)
+    checkpoint_b = service.build_checkpoint("telegram-bots-suite", canonical=True, show_progress=False)
+
+    assert checkpoint_a.snapshot_hash == checkpoint_b.snapshot_hash
+
+
+def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> None:
+    class _FakeHeartbeat:
+        def __init__(self, accepted: bool) -> None:
+            self.accepted = accepted
+
+    class _FakeApi:
+        def __init__(self) -> None:
+            self.heartbeat_calls = 0
+            self.pushes: list[tuple[str, object]] = []
+
+        def heartbeat(self):
+            self.heartbeat_calls += 1
+            return _FakeHeartbeat(self.heartbeat_calls < 3)
+
+        def push_checkpoint(self, slug, request):
+            self.pushes.append((slug, request))
+
+    class _FakeService:
+        heartbeat_interval_seconds = 0
+
+        def __init__(self) -> None:
+            self.api = _FakeApi()
+            self.checkpoints = iter(
+                [
+                    ThreadCheckpoint(
+                        checkpoint_id="checkpoint-1",
+                        superproject_slug="telegram-bots-suite",
+                        thread_id="thread-a",
+                        revision=0,
+                        created_at=utc_now(),
+                        source_device_id="device-a",
+                        canonical=True,
+                        base_revision=0,
+                        turn_hashes=["turn-a"],
+                        summary="checkpoint",
+                        manifest=SuperprojectManifest(
+                            slug="telegram-bots-suite",
+                            name="telegram-bots-suite",
+                            created_at=utc_now(),
+                            updated_at=utc_now(),
+                            managed_files=[],
+                        ),
+                        managed_documents=[],
+                        raw_bundle=None,
+                        snapshot_hash="stable-hash",
+                    ),
+                    ThreadCheckpoint(
+                        checkpoint_id="checkpoint-2",
+                        superproject_slug="telegram-bots-suite",
+                        thread_id="thread-a",
+                        revision=0,
+                        created_at=utc_now(),
+                        source_device_id="device-a",
+                        canonical=True,
+                        base_revision=0,
+                        turn_hashes=["turn-a"],
+                        summary="checkpoint",
+                        manifest=SuperprojectManifest(
+                            slug="telegram-bots-suite",
+                            name="telegram-bots-suite",
+                            created_at=utc_now(),
+                            updated_at=utc_now(),
+                            managed_files=[],
+                        ),
+                        managed_documents=[],
+                        raw_bundle=None,
+                        snapshot_hash="stable-hash",
+                    ),
+                ]
+            )
+            self.progress_messages: list[str] = []
+            self.sync_inactive_marked = False
+
+        def api_client(self):
+            return self.api
+
+        def flush_outbound_queue(self, _api):
+            return None
+
+        def build_checkpoint(self, _slug, *, canonical, show_progress):
+            assert canonical is True
+            assert show_progress is False
+            return next(self.checkpoints)
+
+        def report_progress(self, message: str) -> None:
+            self.progress_messages.append(message)
+
+        def enqueue_checkpoint(self, _checkpoint) -> None:
+            raise AssertionError("Queueing was not expected in the stable checkpoint case.")
+
+        def mark_sync_inactive(self) -> None:
+            self.sync_inactive_marked = True
+
+    service = _FakeService()
+    worker = SyncWorker(service, "telegram-bots-suite")
+    worker.run()
+
+    assert len(service.api.pushes) == 1
+    slug, request = service.api.pushes[0]
+    assert slug == "telegram-bots-suite"
+    assert request.checkpoint.canonical is True
+    assert request.checkpoint.snapshot_hash == "stable-hash"
+    assert service.sync_inactive_marked is True
 
 
 def test_update_from_server_reports_progress_steps(tmp_path) -> None:

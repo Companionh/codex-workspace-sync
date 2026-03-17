@@ -65,11 +65,18 @@ class SyncWorker(threading.Thread):
                 self.service.report_progress("Live sync stopped because this device no longer owns the active lease.")
                 self.service.mark_sync_inactive()
                 return
-            checkpoint = self.service.build_checkpoint(
-                self.superproject_slug,
-                canonical=True,
-                show_progress=False,
-            )
+            try:
+                checkpoint = self.service.build_checkpoint(
+                    self.superproject_slug,
+                    canonical=True,
+                    show_progress=False,
+                )
+            except Exception as exc:
+                self.service.report_progress(
+                    f"Checkpoint build failed for '{self.superproject_slug}': {exc}. Retrying..."
+                )
+                time.sleep(self.service.heartbeat_interval_seconds)
+                continue
             if checkpoint.snapshot_hash == self.last_pushed_hash:
                 time.sleep(self.service.heartbeat_interval_seconds)
                 continue
@@ -417,6 +424,35 @@ class ClientService:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(decode_b64(content_b64))
 
+    @staticmethod
+    def _is_volatile_raw_artifact(relative_path: str) -> bool:
+        return (
+            relative_path == "session_index.jsonl"
+            or relative_path.startswith("state_")
+            or relative_path.startswith("logs_")
+            or relative_path.endswith((".sqlite", ".sqlite-shm", ".sqlite-wal"))
+        )
+
+    @classmethod
+    def _stable_raw_snapshot_entries(cls, raw_bundle) -> list[dict[str, str]]:
+        return [
+            {
+                "relative_path": artifact.relative_path,
+                "sha256": artifact.sha256,
+            }
+            for artifact in raw_bundle.files
+            if not cls._is_volatile_raw_artifact(artifact.relative_path)
+        ]
+
+    @staticmethod
+    def _session_checkpoints_from_state(server_state) -> list[ThreadCheckpoint]:
+        checkpoints_by_id: dict[str, ThreadCheckpoint] = {}
+        if server_state.latest_checkpoint is not None:
+            checkpoints_by_id[server_state.latest_checkpoint.checkpoint_id] = server_state.latest_checkpoint
+        for checkpoint in getattr(server_state, "thread_checkpoints", []) or []:
+            checkpoints_by_id[checkpoint.checkpoint_id] = checkpoint
+        return sorted(checkpoints_by_id.values(), key=lambda checkpoint: checkpoint.revision)
+
     def compare_with_server(self, slug: str) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
@@ -466,13 +502,30 @@ class ClientService:
             atomic_write_text(target, document.content)
         self.report_progress(f"Syncing shared skills for '{slug}'...")
         self._write_shared_skills(server_state.shared_skills)
-        if server_state.latest_checkpoint and server_state.latest_checkpoint.raw_bundle:
-            self.report_progress(f"Applying the latest Codex session bundle for '{slug}'...")
-            self._apply_raw_bundle(server_state.latest_checkpoint.raw_bundle)
-            if server_state.latest_checkpoint.thread_id:
-                local_state.pending_thread_refreshes[server_state.latest_checkpoint.thread_id] = (
-                    server_state.latest_checkpoint.revision
+        session_checkpoints = self._session_checkpoints_from_state(server_state)
+        checkpoints_with_raw_bundles = [
+            checkpoint
+            for checkpoint in session_checkpoints
+            if checkpoint.raw_bundle is not None and checkpoint.raw_bundle.files
+        ]
+        if checkpoints_with_raw_bundles:
+            if len(checkpoints_with_raw_bundles) == 1:
+                self.report_progress(f"Applying the latest Codex session bundle for '{slug}'...")
+            else:
+                self.report_progress(
+                    f"Applying {len(checkpoints_with_raw_bundles)} Codex session bundles for '{slug}'..."
                 )
+            for checkpoint in checkpoints_with_raw_bundles:
+                self._apply_raw_bundle(checkpoint.raw_bundle)
+                session_ids = list(checkpoint.raw_bundle.session_ids)
+                if checkpoint.thread_id and checkpoint.thread_id not in session_ids:
+                    session_ids.append(checkpoint.thread_id)
+                for session_id in session_ids:
+                    current_revision = local_state.pending_thread_refreshes.get(session_id, 0)
+                    local_state.pending_thread_refreshes[session_id] = max(
+                        current_revision,
+                        checkpoint.revision,
+                    )
         local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
         local_state.last_aligned_revision = server_state.manifest.revision
         server_file_ids = {
@@ -542,7 +595,7 @@ class ClientService:
             json.dumps(
                 {
                     "documents": [document.record.model_dump(mode="json") for document in documents],
-                    "raw_files": [artifact.sha256 for artifact in raw_bundle.files],
+                    "raw_files": self._stable_raw_snapshot_entries(raw_bundle),
                     "turn_hashes": turn_hashes,
                 },
                 sort_keys=True,

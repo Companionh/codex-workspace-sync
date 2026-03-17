@@ -172,6 +172,7 @@ class PushCheckpointResponse(BaseModel):
 class PullStateResponse(BaseModel):
     manifest: SuperprojectManifest
     latest_checkpoint: ThreadCheckpoint | None = None
+    thread_checkpoints: list[ThreadCheckpoint] = Field(default_factory=list)
     pending_resolutions: list[MismatchResolution] = Field(default_factory=list)
     managed_documents: list[ManagedDocument] = Field(default_factory=list)
     shared_skills: list[RawFileArtifact] = Field(default_factory=list)

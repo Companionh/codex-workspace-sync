@@ -377,6 +377,29 @@ class ServerService:
             return None
         return ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
 
+    def _latest_thread_checkpoints(self, slug: str) -> list[ThreadCheckpoint]:
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM checkpoints
+                WHERE superproject_slug = ?
+                  AND canonical = 1
+                ORDER BY revision DESC
+                """,
+                (slug,),
+            ).fetchall()
+        checkpoints: list[ThreadCheckpoint] = []
+        seen_thread_ids: set[str] = set()
+        for row in rows:
+            checkpoint = ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
+            thread_key = checkpoint.thread_id or ""
+            if thread_key in seen_thread_ids:
+                continue
+            seen_thread_ids.add(thread_key)
+            checkpoints.append(checkpoint)
+        return sorted(checkpoints, key=lambda checkpoint: checkpoint.revision)
+
     def _pending_resolutions(self, slug: str) -> list[MismatchResolution]:
         with self.db.connect() as connection:
             rows = connection.execute(
@@ -412,6 +435,7 @@ class ServerService:
         return PullStateResponse(
             manifest=manifest,
             latest_checkpoint=self._latest_checkpoint(slug),
+            thread_checkpoints=self._latest_thread_checkpoints(slug),
             pending_resolutions=self._pending_resolutions(slug),
             managed_documents=[
                 ManagedDocument(

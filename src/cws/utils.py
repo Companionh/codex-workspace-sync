@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,14 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        os.replace(temp_path, path)
+        for attempt in range(10):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
@@ -97,4 +105,3 @@ def is_relative_to(path: Path, base: Path) -> bool:
 
 def relative_posix(path: Path, base: Path) -> str:
     return path.resolve().relative_to(base.resolve()).as_posix()
-

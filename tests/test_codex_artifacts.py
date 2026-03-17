@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from cws.client.codex import build_managed_documents, build_raw_session_bundle, extract_turn_hashes
+from cws.utils import atomic_write_bytes
 
 
 def test_build_managed_documents_classifies_paths(tmp_path: Path) -> None:
@@ -59,3 +60,22 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
     assert bundle.thread_id == "thread-1"
     assert any(artifact.relative_path.endswith("rollout-abc.jsonl") for artifact in bundle.files)
     assert len(hashes) == 1
+
+
+def test_atomic_write_bytes_retries_transient_permission_error(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "client-state.json"
+    attempts = {"count": 0}
+    real_replace = __import__("os").replace
+
+    def flaky_replace(src: str, dst: str) -> None:
+        if attempts["count"] == 0:
+            attempts["count"] += 1
+            raise PermissionError(5, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("cws.utils.os.replace", flaky_replace)
+
+    atomic_write_bytes(target, b"hello")
+
+    assert attempts["count"] == 1
+    assert target.read_bytes() == b"hello"
