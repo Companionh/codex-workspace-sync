@@ -17,6 +17,7 @@ from cws.models import (
     PushCheckpointRequest,
     PushCheckpointResponse,
     SuperprojectManifest,
+    ThreadSummary,
     ThreadCheckpoint,
 )
 
@@ -83,6 +84,32 @@ class ApiClient:
                 raise
             return self.pull_state(slug).manifest
         return SuperprojectManifest.model_validate(response.json()["manifest"])
+
+    def list_threads(self, slug: str) -> list[ThreadSummary]:
+        try:
+            response = self._request("GET", f"/api/superprojects/{slug}/threads")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            return [
+                ThreadSummary(
+                    thread_id=checkpoint.thread_id,
+                    thread_name=(
+                        (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
+                        or checkpoint.summary
+                        or checkpoint.thread_id
+                    ),
+                    updated_at=(
+                        (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
+                        or checkpoint.created_at
+                    ),
+                    tracked=True,
+                    source="server",
+                )
+                for checkpoint in self.pull_state(slug).thread_checkpoints
+                if checkpoint.thread_id
+            ]
+        return [ThreadSummary.model_validate(item) for item in response.json()["threads"]]
 
     def push_checkpoint(self, slug: str, request: PushCheckpointRequest) -> PushCheckpointResponse:
         response = self._request(

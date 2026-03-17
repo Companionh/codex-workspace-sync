@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cws.client.codex import build_managed_documents, build_raw_session_bundle, extract_turn_hashes
+from cws.client.codex import build_managed_documents, build_raw_session_bundle, extract_turn_hashes, list_local_threads
 from cws.utils import atomic_write_bytes
 
 
@@ -86,11 +86,43 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
     bundle = build_raw_session_bundle(codex_root, [workspace_root])
     hashes = extract_turn_hashes([session_path, session_path_two])
 
-    assert bundle.thread_id == "thread-2"
-    assert bundle.session_ids == ["thread-1", "thread-2"]
+    assert bundle.thread_id == "thread-1"
+    assert bundle.thread_name == "demo"
+    assert bundle.session_ids == ["thread-1"]
     assert any(artifact.relative_path.endswith("rollout-abc.jsonl") for artifact in bundle.files)
-    assert any(artifact.relative_path.endswith("rollout-def.jsonl") for artifact in bundle.files)
+    assert not any(artifact.relative_path.endswith("rollout-def.jsonl") for artifact in bundle.files)
     assert len(hashes) == 2
+
+
+def test_list_local_threads_prefers_codex_thread_name(tmp_path: Path) -> None:
+    codex_root = tmp_path / ".codex"
+    session_dir = codex_root / "sessions" / "2026" / "03" / "16"
+    session_dir.mkdir(parents=True)
+    session_path = session_dir / "rollout-abc.jsonl"
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-1", "cwd": str(tmp_path)}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "fallback title"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (codex_root / "session_index.jsonl").write_text(
+        json.dumps({"id": "thread-1", "thread_name": "Clone Companionh repos"}),
+        encoding="utf-8",
+    )
+
+    threads = list_local_threads(codex_root)
+
+    assert len(threads) == 1
+    assert threads[0].thread_id == "thread-1"
+    assert threads[0].thread_name == "Clone Companionh repos"
 
 
 def test_atomic_write_bytes_retries_transient_permission_error(monkeypatch, tmp_path: Path) -> None:

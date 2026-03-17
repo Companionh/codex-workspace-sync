@@ -42,6 +42,9 @@ class CWSShell:
                     "attach-superproject",
                     "disconnect-superproject <slug>",
                     "delete-superproject-server <slug> [--force]",
+                    "localthreads",
+                    "threadlist <slug>",
+                    "addthread <slug> <thread-id-or-name>",
                     "update-from-server <slug>",
                     "override-current-state <slug> [--thread <id>]",
                     "turn-on-sync <slug>",
@@ -85,6 +88,9 @@ class CWSShell:
             attach_superproject_interactive(self.service)
             return
         if command in {
+            "localthreads",
+            "threadlist",
+            "addthread",
             "update-from-server",
             "override-current-state",
             "turn-on-sync",

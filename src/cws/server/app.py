@@ -19,6 +19,7 @@ from cws.models import (
     PushCheckpointResponse,
     ResolveMismatchRequest,
     SuperprojectManifest,
+    ThreadSummary,
 )
 from cws.server.service import ServerService
 
@@ -119,6 +120,18 @@ def create_app() -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"manifest": manifest}
+
+    @app.get("/api/superprojects/{slug}/threads", response_model=dict[str, list[ThreadSummary]])
+    def list_threads(
+        slug: str,
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> dict[str, list[ThreadSummary]]:
+        try:
+            threads = service.list_threads(slug)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"threads": threads}
 
     @app.post("/api/superprojects/{slug}/checkpoints", response_model=PushCheckpointResponse)
     def push_checkpoint(

@@ -262,3 +262,55 @@ def test_delete_superproject_removes_server_state(tmp_path: Path) -> None:
     assert not (tmp_path / "state" / "superprojects" / "telegram-suite").exists()
     with pytest.raises(FileNotFoundError):
         service.get_manifest("telegram-suite")
+
+
+def test_list_threads_uses_raw_bundle_thread_name(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+    documents = [ManagedDocument(record=record, content="replacement") for record in manifest.managed_files]
+
+    service.push_checkpoint(
+        device.device.device_id,
+        PushCheckpointRequest(
+            checkpoint=ThreadCheckpoint(
+                superproject_slug="telegram-suite",
+                thread_id="thread-a",
+                revision=0,
+                created_at=utc_now(),
+                source_device_id=device.device.device_id,
+                canonical=True,
+                base_revision=manifest.revision,
+                turn_hashes=["turn-a"],
+                summary="fallback summary",
+                manifest=manifest.model_copy(update={"managed_files": [doc.record for doc in documents]}),
+                managed_documents=documents,
+                raw_bundle=RawSessionBundle(
+                    captured_at=utc_now(),
+                    thread_id="thread-a",
+                    thread_name="Clone Companionh repos",
+                    session_ids=["thread-a"],
+                    files=[],
+                ),
+                snapshot_hash="snapshot-thread-a",
+            )
+        ),
+    )
+
+    threads = service.list_threads("telegram-suite")
+
+    assert len(threads) == 1
+    assert threads[0].thread_id == "thread-a"
+    assert threads[0].thread_name == "Clone Companionh repos"

@@ -366,6 +366,7 @@ def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypat
                     name="telegram-bots-suite",
                     managed_root=str(managed_root),
                     workspace_roots=[str(tmp_path / "workspace")],
+                    tracked_thread_ids=["thread-a"],
                     managed_file_ids={"baseline/base_rules.md": "server-file-id"},
                 )
             },
@@ -450,8 +451,18 @@ def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypat
     bundles = iter([raw_bundle_a, raw_bundle_b])
     monkeypatch.setattr("cws.client.sync.build_raw_session_bundle", lambda *_args, **_kwargs: next(bundles))
 
-    checkpoint_a = service.build_checkpoint("telegram-bots-suite", canonical=True, show_progress=False)
-    checkpoint_b = service.build_checkpoint("telegram-bots-suite", canonical=True, show_progress=False)
+    checkpoint_a = service.build_checkpoint(
+        "telegram-bots-suite",
+        canonical=True,
+        show_progress=False,
+        thread_id="thread-a",
+    )
+    checkpoint_b = service.build_checkpoint(
+        "telegram-bots-suite",
+        canonical=True,
+        show_progress=False,
+        thread_id="thread-a",
+    )
 
     assert checkpoint_a.snapshot_hash == checkpoint_b.snapshot_hash
 
@@ -536,10 +547,10 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         def flush_outbound_queue(self, _api):
             return None
 
-        def build_checkpoint(self, _slug, *, canonical, show_progress):
+        def build_live_checkpoints(self, _slug, *, canonical, show_progress):
             assert canonical is True
             assert show_progress is False
-            return next(self.checkpoints)
+            return [next(self.checkpoints)]
 
         def report_progress(self, message: str) -> None:
             self.progress_messages.append(message)
@@ -553,8 +564,8 @@ def test_sync_worker_promotes_repeated_stable_checkpoint_to_canonical_push() -> 
         def _checkpoint_session_ids(self, checkpoint: ThreadCheckpoint) -> list[str]:
             return ClientService._checkpoint_session_ids(checkpoint)
 
-        def _format_thread_labels(self, thread_ids: list[str]) -> str:
-            return ClientService._format_thread_labels(thread_ids)
+        def _format_thread_labels(self, thread_ids: list[str], checkpoint: ThreadCheckpoint | None = None) -> str:
+            return ClientService._format_thread_labels(thread_ids, checkpoint)
 
     service = _FakeService()
     worker = SyncWorker(service, "telegram-bots-suite")

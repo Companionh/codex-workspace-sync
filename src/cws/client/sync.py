@@ -15,7 +15,12 @@ import httpx
 import paramiko
 
 from cws.client.api import ApiClient
-from cws.client.codex import build_managed_documents, build_raw_session_bundle, extract_turn_hashes
+from cws.client.codex import (
+    build_managed_documents,
+    build_raw_session_bundle,
+    extract_turn_hashes,
+    list_local_threads,
+)
 from cws.client.github import fetch_repo_metadata
 from cws.client.state import ClientStateStore
 from cws.models import (
@@ -28,6 +33,7 @@ from cws.models import (
     OutboundQueueItem,
     PushCheckpointRequest,
     SubprojectRecord,
+    ThreadSummary,
     ThreadCheckpoint,
 )
 from cws.utils import atomic_write_bytes, atomic_write_text, decode_b64, dump_json_file, sha256_text, slugify, utc_now
@@ -50,8 +56,8 @@ class SyncWorker(threading.Thread):
         self.service = service
         self.superproject_slug = superproject_slug
         self.stop_event = threading.Event()
-        self.pending_checkpoint: ThreadCheckpoint | None = None
-        self.last_pushed_hash: str | None = None
+        self.pending_checkpoints: dict[str, ThreadCheckpoint] = {}
+        self.last_pushed_hashes: dict[str, str] = {}
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -66,7 +72,7 @@ class SyncWorker(threading.Thread):
                 self.service.mark_sync_inactive()
                 return
             try:
-                checkpoint = self.service.build_checkpoint(
+                checkpoints = self.service.build_live_checkpoints(
                     self.superproject_slug,
                     canonical=True,
                     show_progress=False,
@@ -77,38 +83,43 @@ class SyncWorker(threading.Thread):
                 )
                 time.sleep(self.service.heartbeat_interval_seconds)
                 continue
-            if checkpoint.snapshot_hash == self.last_pushed_hash:
-                time.sleep(self.service.heartbeat_interval_seconds)
-                continue
-            if self.pending_checkpoint is None:
-                self.pending_checkpoint = checkpoint
-            elif self.pending_checkpoint.snapshot_hash == checkpoint.snapshot_hash:
-                thread_labels = self.service._format_thread_labels(
-                    self.service._checkpoint_session_ids(checkpoint)
-                )
-                try:
-                    self.service.report_progress(
-                        f"Detected a finished Codex turn for '{self.superproject_slug}' in thread(s): {thread_labels}."
+            for checkpoint in checkpoints:
+                key = checkpoint.thread_id or "__docs__"
+                if checkpoint.snapshot_hash == self.last_pushed_hashes.get(key):
+                    continue
+                pending_checkpoint = self.pending_checkpoints.get(key)
+                if pending_checkpoint is None:
+                    self.pending_checkpoints[key] = checkpoint
+                    continue
+                if pending_checkpoint.snapshot_hash == checkpoint.snapshot_hash:
+                    thread_labels = self.service._format_thread_labels(
+                        self.service._checkpoint_session_ids(checkpoint),
+                        checkpoint,
                     )
-                    self.service.report_progress(
-                        f"Pushing the latest checkpoint for '{self.superproject_slug}' to the server..."
-                    )
-                    response = api.push_checkpoint(
-                        self.superproject_slug,
-                        PushCheckpointRequest(checkpoint=checkpoint),
-                    )
-                    self.last_pushed_hash = checkpoint.snapshot_hash
-                    self.service.report_progress(
-                        f"Server updated for '{self.superproject_slug}' at revision {response.revision} for thread(s): {thread_labels}."
-                    )
-                except Exception:
-                    self.service.report_progress(
-                        f"Server push failed for '{self.superproject_slug}'. Queueing the checkpoint for retry."
-                    )
-                    self.service.enqueue_checkpoint(checkpoint)
-                self.pending_checkpoint = None
-            else:
-                scratch = self.pending_checkpoint.model_copy(update={"canonical": False})
+                    try:
+                        self.service.report_progress(
+                            f"Detected a finished Codex turn for '{self.superproject_slug}' in thread(s): {thread_labels}."
+                        )
+                        self.service.report_progress(
+                            f"Pushing the latest checkpoint for '{self.superproject_slug}' to the server..."
+                        )
+                        response = api.push_checkpoint(
+                            self.superproject_slug,
+                            PushCheckpointRequest(checkpoint=checkpoint),
+                        )
+                        self.last_pushed_hashes[key] = checkpoint.snapshot_hash
+                        self.service.report_progress(
+                            f"Server updated for '{self.superproject_slug}' at revision {response.revision} for thread(s): {thread_labels}."
+                        )
+                    except Exception:
+                        self.service.report_progress(
+                            f"Server push failed for '{self.superproject_slug}'. Queueing the checkpoint for retry."
+                        )
+                        self.service.enqueue_checkpoint(checkpoint)
+                    self.pending_checkpoints.pop(key, None)
+                    continue
+
+                scratch = pending_checkpoint.model_copy(update={"canonical": False})
                 try:
                     api.push_checkpoint(
                         self.superproject_slug,
@@ -116,7 +127,7 @@ class SyncWorker(threading.Thread):
                     )
                 except Exception:
                     pass
-                self.pending_checkpoint = checkpoint
+                self.pending_checkpoints[key] = checkpoint
             time.sleep(self.service.heartbeat_interval_seconds)
         self.service.mark_sync_inactive()
 
@@ -348,6 +359,54 @@ class ClientService:
             },
         }
 
+    def local_threads(self) -> list[ThreadSummary]:
+        return list_local_threads(self.codex_root)
+
+    def _tracked_thread_ids(self, slug: str) -> list[str]:
+        local_state = self._get_superproject_state(slug)
+        return list(dict.fromkeys(local_state.tracked_thread_ids))
+
+    def _thread_lookup(self) -> dict[str, ThreadSummary]:
+        return {thread.thread_id: thread for thread in self.local_threads()}
+
+    def _match_local_thread(self, thread_ref: str) -> ThreadSummary:
+        normalized = thread_ref.strip()
+        if not normalized:
+            raise RuntimeError("Thread reference cannot be empty.")
+        threads = self.local_threads()
+        by_id = {thread.thread_id: thread for thread in threads}
+        if normalized in by_id:
+            return by_id[normalized]
+        matches = [
+            thread
+            for thread in threads
+            if thread.thread_name.casefold() == normalized.casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple local threads match '{thread_ref}'. Use the thread ID instead."
+            )
+        partial_matches = [
+            thread
+            for thread in threads
+            if normalized.casefold() in thread.thread_name.casefold()
+        ]
+        if len(partial_matches) == 1:
+            return partial_matches[0]
+        raise RuntimeError(f"No local Codex thread matched '{thread_ref}'.")
+
+    def add_thread(self, slug: str, thread_ref: str) -> ThreadSummary:
+        local_state = self._get_superproject_state(slug)
+        thread = self._match_local_thread(thread_ref)
+        tracked = list(dict.fromkeys(local_state.tracked_thread_ids + [thread.thread_id]))
+        local_state.tracked_thread_ids = tracked
+        config = self.config()
+        config.superprojects[slug] = local_state
+        self.save_config(config)
+        return thread.model_copy(update={"tracked": True})
+
     def create_superproject(
         self,
         *,
@@ -468,9 +527,54 @@ class ClientService:
             session_ids.append(checkpoint.thread_id)
         return session_ids
 
+    def _summary_from_checkpoint(self, checkpoint: ThreadCheckpoint) -> ThreadSummary:
+        thread_id = checkpoint.thread_id
+        if not thread_id:
+            raise RuntimeError("Checkpoint does not refer to a named thread.")
+        thread_name = (
+            (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
+            or checkpoint.summary
+            or thread_id
+        )
+        updated_at = (
+            (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
+            or checkpoint.created_at
+        )
+        return ThreadSummary(
+            thread_id=thread_id,
+            thread_name=thread_name,
+            updated_at=updated_at,
+            tracked=thread_id in self._tracked_thread_ids(checkpoint.superproject_slug),
+            source="server",
+        )
+
+    def threadlist(self, slug: str) -> list[ThreadSummary]:
+        summaries = self.api_client().list_threads(slug)
+        local_lookup = self._thread_lookup()
+        for summary in summaries:
+            local_match = local_lookup.get(summary.thread_id)
+            if local_match and local_match.thread_name:
+                summary.thread_name = local_match.thread_name
+            summary.tracked = summary.thread_id in self._tracked_thread_ids(slug)
+        return sorted(summaries, key=lambda item: (item.updated_at, item.thread_name, item.thread_id), reverse=True)
+
     @classmethod
-    def _format_thread_labels(cls, thread_ids: list[str]) -> str:
-        labels = list(dict.fromkeys(thread_ids))
+    def _format_thread_labels(
+        cls,
+        thread_ids: list[str],
+        checkpoint: ThreadCheckpoint | None = None,
+    ) -> str:
+        labels: list[str] = []
+        seen: set[str] = set()
+        preferred_name = checkpoint.raw_bundle.thread_name if checkpoint and checkpoint.raw_bundle else None
+        for thread_id in thread_ids:
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            if preferred_name and checkpoint and checkpoint.thread_id == thread_id:
+                labels.append(preferred_name)
+            else:
+                labels.append(thread_id)
         if not labels:
             return "shared Codex runtime files"
         return ", ".join(labels)
@@ -499,6 +603,66 @@ class ClientService:
         )
         return DiffSummary(new_on_server=new_on_server, new_local=new_local, changed=changed)
 
+    def _prompt_thread_update_mode(
+        self,
+        slug: str,
+        diff: DiffSummary,
+        thread_summaries: list[ThreadSummary],
+    ) -> str:
+        typer_message = (
+            f"Server has updates for '{slug}': "
+            f"{len(thread_summaries)} thread(s), "
+            f"{len(diff.new_on_server)} new server doc(s), "
+            f"{len(diff.new_local)} local-only doc(s), "
+            f"{len(diff.changed)} changed doc(s). "
+            "Type 'update', 'select', or 'abort': "
+        )
+        while True:
+            choice = input(typer_message).strip().lower()
+            if choice in {"update", "select", "abort"}:
+                return choice
+
+    def _select_server_thread_checkpoints(
+        self,
+        slug: str,
+        checkpoints: list[ThreadCheckpoint],
+        *,
+        assume_yes: bool,
+        diff: DiffSummary,
+    ) -> list[ThreadCheckpoint] | None:
+        thread_summaries = [
+            self._summary_from_checkpoint(checkpoint)
+            for checkpoint in checkpoints
+            if checkpoint.thread_id
+        ]
+        if not thread_summaries:
+            if diff.has_mismatch and not assume_yes:
+                message = (
+                    "Server has updates. Apply them now? "
+                    f"new_on_server={len(diff.new_on_server)}, new_local={len(diff.new_local)}, changed={len(diff.changed)}"
+                )
+                if input(f"{message} [y/N]: ").strip().lower() not in {"y", "yes"}:
+                    return None
+            return checkpoints
+        if assume_yes:
+            return checkpoints
+
+        choice = self._prompt_thread_update_mode(slug, diff, thread_summaries)
+        if choice == "abort":
+            return None
+        if choice == "update":
+            return checkpoints
+
+        selected_ids: set[str] = set()
+        for summary in sorted(thread_summaries, key=lambda item: (item.updated_at, item.thread_name), reverse=True):
+            prompt = (
+                f"Overwrite local thread '{summary.thread_name}' "
+                f"({summary.thread_id}, last updated {summary.updated_at.isoformat()})? [y/N]: "
+            )
+            if input(prompt).strip().lower() in {"y", "yes"}:
+                selected_ids.add(summary.thread_id)
+        return [checkpoint for checkpoint in checkpoints if checkpoint.thread_id in selected_ids]
+
     def update_from_server(self, slug: str, *, assume_yes: bool = False) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
@@ -522,13 +686,21 @@ class ClientService:
                 if server_by_path[path].sha256 != local_by_path[path].sha256
             ),
         )
-        if diff.has_mismatch and not assume_yes:
-            message = (
-                "Server has updates. Apply them now? "
-                f"new_on_server={len(diff.new_on_server)}, new_local={len(diff.new_local)}, changed={len(diff.changed)}"
-            )
-            if input(f"{message} [y/N]: ").strip().lower() not in {"y", "yes"}:
-                return diff
+        session_checkpoints = self._session_checkpoints_from_state(server_state)
+        checkpoints_with_raw_bundles = [
+            checkpoint
+            for checkpoint in session_checkpoints
+            if checkpoint.raw_bundle is not None and checkpoint.raw_bundle.files
+        ]
+        selected_checkpoints = self._select_server_thread_checkpoints(
+            slug,
+            checkpoints_with_raw_bundles,
+            assume_yes=assume_yes,
+            diff=diff,
+        )
+        if selected_checkpoints is None:
+            self.report_progress(f"Update from server aborted for '{slug}'.")
+            return diff
         self.report_progress(f"Applying server updates for '{slug}'...")
         quarantine_root = self.state_store.paths.cache_dir / "quarantine" / slug / utc_now().strftime("%Y%m%d%H%M%S")
         for path in diff.new_local:
@@ -544,21 +716,15 @@ class ClientService:
             atomic_write_text(target, document.content)
         self.report_progress(f"Syncing shared skills for '{slug}'...")
         self._write_shared_skills(server_state.shared_skills)
-        session_checkpoints = self._session_checkpoints_from_state(server_state)
-        checkpoints_with_raw_bundles = [
-            checkpoint
-            for checkpoint in session_checkpoints
-            if checkpoint.raw_bundle is not None and checkpoint.raw_bundle.files
-        ]
-        if checkpoints_with_raw_bundles:
-            if len(checkpoints_with_raw_bundles) == 1:
+        if selected_checkpoints:
+            if len(selected_checkpoints) == 1:
                 self.report_progress(f"Applying the latest Codex session bundle for '{slug}'...")
             else:
                 self.report_progress(
-                    f"Applying {len(checkpoints_with_raw_bundles)} Codex session bundles for '{slug}'..."
+                    f"Applying {len(selected_checkpoints)} Codex session bundles for '{slug}'..."
                 )
             refreshed_session_ids: list[str] = []
-            for checkpoint in checkpoints_with_raw_bundles:
+            for checkpoint in selected_checkpoints:
                 self._apply_raw_bundle(checkpoint.raw_bundle)
                 session_ids = self._checkpoint_session_ids(checkpoint)
                 refreshed_session_ids.extend(session_ids)
@@ -606,7 +772,14 @@ class ClientService:
                     continue
                 raise
 
-    def build_checkpoint(self, slug: str, *, canonical: bool, show_progress: bool = True) -> ThreadCheckpoint:
+    def build_checkpoint(
+        self,
+        slug: str,
+        *,
+        canonical: bool,
+        show_progress: bool = True,
+        thread_id: str | None = None,
+    ) -> ThreadCheckpoint:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
@@ -627,42 +800,72 @@ class ClientService:
             }
         )
         workspace_roots = [Path(path) for path in local_state.workspace_roots if Path(path).exists()]
-        if show_progress:
-            self.report_progress(f"Capturing Codex session artifacts for '{slug}'...")
-        raw_bundle = build_raw_session_bundle(self.codex_root, workspace_roots)
-        session_files = [
-            self.codex_root / artifact.relative_path
-            for artifact in raw_bundle.files
-            if artifact.relative_path.startswith("sessions/")
-        ]
-        turn_hashes = extract_turn_hashes([path for path in session_files if path.exists()])
+        raw_bundle = None
+        turn_hashes: list[str] = []
+        if thread_id is not None:
+            if show_progress:
+                self.report_progress(f"Capturing Codex session artifacts for '{slug}'...")
+            raw_bundle = build_raw_session_bundle(self.codex_root, workspace_roots, thread_id=thread_id)
+            session_files = [
+                self.codex_root / artifact.relative_path
+                for artifact in raw_bundle.files
+                if artifact.relative_path.startswith("sessions/")
+            ]
+            turn_hashes = extract_turn_hashes([path for path in session_files if path.exists()])
         if show_progress:
             self.report_progress(f"Computing the checkpoint summary for '{slug}'...")
         snapshot_hash = sha256_text(
             json.dumps(
                 {
                     "documents": [document.record.model_dump(mode="json") for document in documents],
-                    "raw_files": self._stable_raw_snapshot_entries(raw_bundle),
+                    "raw_files": self._stable_raw_snapshot_entries(raw_bundle) if raw_bundle else [],
                     "turn_hashes": turn_hashes,
+                    "thread_id": thread_id,
                 },
                 sort_keys=True,
             )
         )
+        summary = (
+            f"Synced {len(documents)} managed Markdown files and {len(raw_bundle.files)} Codex artifacts for "
+            f"{raw_bundle.thread_name or thread_id}."
+            if raw_bundle is not None
+            else f"Synced {len(documents)} managed Markdown files."
+        )
         return ThreadCheckpoint(
             superproject_slug=slug,
-            thread_id=raw_bundle.thread_id,
+            thread_id=thread_id or (raw_bundle.thread_id if raw_bundle else None),
             revision=incoming_manifest.revision,
             created_at=utc_now(),
             source_device_id=self.config().device_id or "unknown-device",
             canonical=canonical,
             base_revision=manifest.revision,
             turn_hashes=turn_hashes,
-            summary=f"Synced {len(documents)} managed Markdown files and {len(raw_bundle.files)} Codex artifacts.",
+            summary=summary,
             manifest=incoming_manifest,
             managed_documents=documents,
             raw_bundle=raw_bundle,
             snapshot_hash=snapshot_hash,
         )
+
+    def build_live_checkpoints(
+        self,
+        slug: str,
+        *,
+        canonical: bool,
+        show_progress: bool = True,
+    ) -> list[ThreadCheckpoint]:
+        tracked_thread_ids = self._tracked_thread_ids(slug)
+        if not tracked_thread_ids:
+            return [self.build_checkpoint(slug, canonical=canonical, show_progress=show_progress, thread_id=None)]
+        return [
+            self.build_checkpoint(
+                slug,
+                canonical=canonical,
+                show_progress=show_progress,
+                thread_id=thread_id,
+            )
+            for thread_id in tracked_thread_ids
+        ]
 
     def enqueue_checkpoint(self, checkpoint: ThreadCheckpoint) -> None:
         queue = self.state_store.load_queue()

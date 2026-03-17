@@ -86,8 +86,18 @@ class RawSessionBundle(BaseModel):
     bundle_id: str = Field(default_factory=lambda: str(uuid4()))
     captured_at: datetime
     thread_id: str | None = None
+    thread_name: str | None = None
+    thread_updated_at: datetime | None = None
     session_ids: list[str] = Field(default_factory=list)
     files: list[RawFileArtifact] = Field(default_factory=list)
+
+
+class ThreadSummary(BaseModel):
+    thread_id: str
+    thread_name: str
+    updated_at: datetime
+    tracked: bool = False
+    source: Literal["local", "server"] = "local"
 
 
 class ThreadCheckpoint(BaseModel):
@@ -199,6 +209,7 @@ class ClientSuperprojectState(BaseModel):
     name: str
     managed_root: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
+    tracked_thread_ids: list[str] = Field(default_factory=list)
     last_alignment_action: AlignmentAction = AlignmentAction.NONE
     last_aligned_revision: int = 0
     last_local_snapshot_hash: str | None = None

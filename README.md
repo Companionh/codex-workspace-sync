@@ -1,6 +1,6 @@
 # codex-workspace-sync
 
-`codex-workspace-sync` is a Python monorepo for keeping Codex workspace context portable across multiple Windows devices with a Hetzner-hosted sync hub.
+`codex-workspace-sync` is a Python monorepo for keeping Codex workspace context portable across multiple Windows devices with a self-hosted sync hub.
 
 The repo contains:
 
@@ -27,15 +27,15 @@ The repo contains:
 - `docs/` system and protocol docs
 - `skills/shared/` lightweight skills shared by all superprojects
 - `scripts/windows/` convenience launchers for the sync shell
-- `scripts/server/` convenience launchers for the Hetzner service
+- `scripts/server/` convenience launchers for the server-side service
 - `tools/` publishing helpers used to export a sanitized GitHub tree
 
 ## Quick start
 
 1. Install Python 3.12.
 2. Install the package in editable mode: `py -3.12 -m pip install -e .[dev]`
-3. Initialize the server on Hetzner: `cws-server init`
-4. Start the API on Hetzner: `cws-server serve`
+3. Initialize the server: `cws-server init`
+4. Start the API: `cws-server serve`
 5. Enroll a Windows device: `cws enroll-device`
 6. Launch the sync shell: `scripts\\windows\\cws-shell.bat`
 
@@ -45,10 +45,10 @@ If you want a Windows launcher that stays open after enrollment succeeds or fail
 
 That launcher runs against the repo's local `src` tree, forces a persistent `cmd` window, and writes logs under `%LOCALAPPDATA%\\CodexWorkspaceSync\\logs\\`.
 
-Enrollment registers the device with the server, but it does not automatically bind existing server superprojects into the local client config. If the server already has a superproject such as `telegram-bots-suite`, attach it locally before running `update-from-server`.
+Enrollment registers the device with the server, but it does not automatically bind existing server superprojects into the local client config. If the server already has the superproject you want, attach it locally before running `update-from-server`.
 During enrollment:
 
-- `Secondary passphrase` means the passphrase you set with `cws-server init` on Hetzner.
+- `Secondary passphrase` means the passphrase you set with `cws-server init` on the server.
 - `SSH password` means the Linux account password and can be left blank for key-based SSH.
 - `SSH key passphrase` means the passphrase that unlocks your local private key.
 
@@ -56,7 +56,7 @@ During enrollment:
 
 Use `scripts\\windows\\push-repo.bat` to publish this repo from Windows.
 
-- It mirrors the `telegram-scraper-bot` workflow instead of pushing from the live checkout.
+- It uses the same sanitized temp-checkout publishing pattern as the other sibling repos instead of pushing from the live checkout.
 - It exports a curated project tree into `backups\\push_tmp_repo`, commits there, and pushes from that temp checkout.
 - If `scripts\\windows\\push-config.local.cmd` exists, it loads your repo URL, branch, and temp-checkout path from there.
 - It assumes Git authentication is already configured on the machine, preferably with SSH.
@@ -78,7 +78,7 @@ Use `scripts\\windows\\pull-repo.bat` to update this repo from GitHub on Windows
 - It pauses at the end when launched by double-click so you can read the output.
 - It uses the same local config file as the push helper.
 
-## Hetzner repo update helper
+## Server repo update helper
 
 Use `scripts/server/update_from_github.sh` on the server-side app checkout to fast-forward from GitHub.
 
@@ -92,9 +92,9 @@ If you install the server helper, you also get a single-command launcher:
 
 That wrapper loads the server auth file, autostashes checkout changes, fast-forwards from GitHub, refreshes the package install, runs compile checks, reloads `systemd`, and restarts `codex-workspace-sync.service`. The older command name `update-codex-workspace-sync` remains as a compatibility alias.
 
-## Hetzner service install helpers
+## Server service install helpers
 
-Use these scripts to fit the project into the same `/opt` + `/etc` + `systemd` pattern as the sibling bots:
+Use these scripts to fit the project into a standard `/opt` + `/etc` + `systemd` Linux deployment pattern:
 
 - `scripts/server/install_systemd.sh`
 - `scripts/server/install_update_command.sh`

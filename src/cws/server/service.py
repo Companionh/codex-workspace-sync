@@ -31,6 +31,7 @@ from cws.models import (
     RegisterDeviceRequest,
     RegisterDeviceResponse,
     SuperprojectManifest,
+    ThreadSummary,
     ThreadCheckpoint,
 )
 from cws.server.db import ServerDatabase
@@ -447,6 +448,29 @@ class ServerService:
             ],
             shared_skills=self._shared_skills(),
         )
+
+    def list_threads(self, slug: str) -> list[ThreadSummary]:
+        summaries: list[ThreadSummary] = []
+        for checkpoint in self._latest_thread_checkpoints(slug):
+            if not checkpoint.thread_id:
+                continue
+            summaries.append(
+                ThreadSummary(
+                    thread_id=checkpoint.thread_id,
+                    thread_name=(
+                        (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
+                        or checkpoint.summary
+                        or checkpoint.thread_id
+                    ),
+                    updated_at=(
+                        (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
+                        or checkpoint.created_at
+                    ),
+                    tracked=True,
+                    source="server",
+                )
+            )
+        return sorted(summaries, key=lambda item: (item.updated_at, item.thread_name, item.thread_id), reverse=True)
 
     def delete_superproject(self, slug: str, *, requesting_device_id: str, force: bool = False) -> dict[str, object]:
         manifest = self.get_manifest(slug)

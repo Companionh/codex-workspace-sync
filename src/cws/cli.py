@@ -184,6 +184,22 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         diff = client.update_from_server(slug)
         typer.echo(json.dumps(diff.__dict__, indent=2))
         return
+    if command == "threadlist":
+        slug = _resolve_shell_superproject(args)
+        typer.echo(json.dumps([thread.model_dump(mode="json") for thread in client.threadlist(slug)], indent=2))
+        return
+    if command == "localthreads":
+        typer.echo(json.dumps([thread.model_dump(mode="json") for thread in client.local_threads()], indent=2))
+        return
+    if command == "addthread":
+        slug = _resolve_shell_superproject(args)
+        positional = _positional_args(args)
+        if len(positional) < 2:
+            raise RuntimeError("Missing thread name or ID")
+        thread_ref = positional[1]
+        thread = client.add_thread(slug, thread_ref)
+        typer.echo(json.dumps(thread.model_dump(mode="json"), indent=2))
+        return
     if command == "override-current-state":
         slug = _resolve_shell_superproject(args)
         thread_id = arg_value("--thread", required=False)
@@ -306,6 +322,30 @@ def update_from_server(
     slug = _resolve_cli_superproject(superproject, superproject_option)
     diff = service().update_from_server(slug)
     typer.echo(json.dumps(diff.__dict__, indent=2))
+
+
+@app.command("threadlist")
+def threadlist(
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps([thread.model_dump(mode="json") for thread in service().threadlist(slug)], indent=2))
+
+
+@app.command("localthreads")
+def localthreads() -> None:
+    typer.echo(json.dumps([thread.model_dump(mode="json") for thread in service().local_threads()], indent=2))
+
+
+@app.command("addthread")
+def addthread(
+    superproject: str | None = typer.Argument(None),
+    thread_ref: str = typer.Argument(...),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps(service().add_thread(slug, thread_ref).model_dump(mode="json"), indent=2))
 
 
 @app.command("override-current-state")

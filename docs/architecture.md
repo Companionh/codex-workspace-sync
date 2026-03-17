@@ -5,12 +5,12 @@
 `codex-workspace-sync` has two runtime halves:
 
 - a Windows client that watches Codex session artifacts and managed Markdown
-- a Hetzner-hosted sync hub that stores canonical state for all superprojects
+- a self-hosted sync hub that stores canonical state for all superprojects
 
 The repo itself is published with a sanitized export flow:
 
 - Windows exports a curated tree into a dedicated temp checkout before commit and push
-- the Hetzner app checkout fast-forwards from GitHub and leaves live state under `/opt/codex-workspace-sync/state` outside the code repo
+- the server app checkout fast-forwards from GitHub and leaves live state under `/opt/codex-workspace-sync/state` outside the code repo
 
 The sync hub owns:
 

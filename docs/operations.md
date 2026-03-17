@@ -1,6 +1,6 @@
 # Operations
 
-## Hetzner paths
+## Recommended Linux paths
 
 - app code: `/opt/codex-workspace-sync/app`
 - live sync state: `/opt/codex-workspace-sync/state`
@@ -44,10 +44,10 @@ Prompt meanings during enrollment:
 - `SSH password`: the Linux account password, usually blank when SSH keys are used
 - `SSH key passphrase`: the passphrase that unlocks the local private key on Windows
 
-Enrollment only registers the device and stores its credentials. It does not automatically create local bindings for server-side superprojects. If `telegram-bots-suite` already exists on the server, run `attach-superproject` once on each new machine before using `update-from-server`.
+Enrollment only registers the device and stores its credentials. It does not automatically create local bindings for server-side superprojects. If a superproject already exists on the server, run `attach-superproject` once on each new machine before using `update-from-server`.
 ## Publishing code from Windows
 
-`codex-workspace-sync` uses the same safe publish pattern as `telegram-scraper-bot`.
+`codex-workspace-sync` uses the same safe publish pattern as the sibling repos that publish from a sanitized temp checkout.
 
 1. Copy `scripts/windows/push-config.example.cmd` to `scripts/windows/push-config.local.cmd`.
 2. Fill in the repo URL, branch, and optional temp checkout path.
@@ -69,10 +69,10 @@ Use `scripts/windows/pull-repo.bat` to pull the latest project code onto a Windo
 
 By default the helper fetches `origin`, fast-forwards the current branch, refreshes the editable Python install, and runs `compileall` over `src`, `tests`, and `tools`. If the repo has uncommitted changes, it autostashes them first and restores them after the update. If the local branch and remote branch diverge, it prompts either to rebase local commits or to create a backup branch and sync the current branch to the fetched remote branch. You can control that behavior with `REBASE_ON_DIVERGENCE` and `RESET_ON_DIVERGENCE` in `push-config.local.cmd`.
 
-## Updating code on Hetzner
+## Updating code on the server
 
 1. Copy `scripts/server/github.env.template` to `scripts/server/github.env` or `/etc/codex-workspace-sync/github.env`.
-2. Fill in the GitHub username, fine-grained token, and repo URL.
+2. Fill in the GitHub username, GitHub token, and repo URL.
 3. Run `scripts/server/update_from_github.sh`.
 
 The updater creates a pre-update backup of the live sync state, autostashes checkout changes, fast-forwards the checkout, refreshes the editable Python install, runs a compile check, reloads `systemd`, and can restart a service after the update.
@@ -85,9 +85,9 @@ update-codex-workspace
 
 That installed launcher also keeps `update-codex-workspace-sync` available as a compatibility alias.
 
-## Installing the Hetzner service
+## Installing the server service
 
-The project now includes sibling-style server install helpers:
+The project now includes server install helpers:
 
 - `scripts/server/install_systemd.sh`
 - `scripts/server/install_update_command.sh`

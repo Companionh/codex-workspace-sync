@@ -21,6 +21,18 @@ class _RecordingService:
         self.calls.append(("turn_on_sync", (slug, steal)))
         return slug
 
+    def local_threads(self):
+        self.calls.append(("local_threads", ()))
+        return [type("Thread", (), {"model_dump": lambda self, mode="json": {"thread_id": "thread-a"}})()]
+
+    def threadlist(self, slug: str):
+        self.calls.append(("threadlist", (slug,)))
+        return [type("Thread", (), {"model_dump": lambda self, mode="json": {"thread_id": "thread-a"}})()]
+
+    def add_thread(self, slug: str, thread_ref: str):
+        self.calls.append(("add_thread", (slug, thread_ref)))
+        return type("Thread", (), {"model_dump": lambda self, mode="json": {"thread_id": "thread-a"}})()
+
 
 def test_shell_reports_command_errors_and_keeps_running(monkeypatch, capsys) -> None:
     inputs = iter(["status", "quit"])
@@ -64,3 +76,23 @@ def test_cli_service_factory_wires_progress_callback(monkeypatch) -> None:
     service()
 
     assert callable(captured["progress_callback"])
+
+
+def test_run_shell_command_lists_local_threads(capsys) -> None:
+    service = _RecordingService()
+
+    run_shell_command(service, "localthreads", [])
+
+    captured = capsys.readouterr()
+    assert service.calls == [("local_threads", ())]
+    assert '"thread_id": "thread-a"' in captured.out
+
+
+def test_run_shell_command_adds_thread_by_name(capsys) -> None:
+    service = _RecordingService()
+
+    run_shell_command(service, "addthread", ["telegram-bots-suite", "Clone Companionh repos"])
+
+    captured = capsys.readouterr()
+    assert service.calls == [("add_thread", ("telegram-bots-suite", "Clone Companionh repos"))]
+    assert '"thread_id": "thread-a"' in captured.out
