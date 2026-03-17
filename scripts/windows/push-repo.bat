@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
-set "CWS_PAUSE_ON_ERROR=1"
-set "CWS_PAUSE_ON_SUCCESS=1"
+if not defined CWS_PAUSE_ON_ERROR set "CWS_PAUSE_ON_ERROR=1"
+if not defined CWS_PAUSE_ON_SUCCESS set "CWS_PAUSE_ON_SUCCESS=1"
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "REPO_ROOT=%%~fI"
@@ -13,6 +13,7 @@ if exist "%LOCAL_CONFIG%" call "%LOCAL_CONFIG%"
 
 if not defined GIT_EXE set "GIT_EXE=C:\Program Files\Git\cmd\git.exe"
 if not defined PYTHON_EXE set "PYTHON_EXE=python"
+if not defined GIT_SSH_COMMAND if exist "%SystemRoot%\System32\OpenSSH\ssh.exe" set "GIT_SSH_COMMAND=C:/Windows/System32/OpenSSH/ssh.exe"
 if not defined PUBLISH_CHECKOUT set "PUBLISH_CHECKOUT=%DEFAULT_PUBLISH_CHECKOUT%"
 if not defined GITHUB_BRANCH set "GITHUB_BRANCH=main"
 if not defined GITHUB_REMOTE set "GITHUB_REMOTE=origin"
@@ -77,14 +78,23 @@ if not exist "%PUBLISH_CHECKOUT%\.git" (
 pushd "%PUBLISH_CHECKOUT%" >nul
 "%GIT_EXE%" remote set-url origin "%PUBLISH_REPO_URL%" >nul 2>nul
 "%GIT_EXE%" remote set-url --push origin "%PUBLISH_REPO_URL%" >nul 2>nul
-"%GIT_EXE%" fetch origin "%GITHUB_BRANCH%" >nul 2>nul
+"%GIT_EXE%" fetch --prune origin "+refs/heads/%GITHUB_BRANCH%:refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 (
-  "%GIT_EXE%" checkout -B "%GITHUB_BRANCH%"
-) else (
-  "%GIT_EXE%" checkout -B "%GITHUB_BRANCH%" FETCH_HEAD
+  echo git fetch failed in publish checkout.
+  popd >nul
+  popd >nul
+  goto :error_exit
 )
+"%GIT_EXE%" checkout -B "%GITHUB_BRANCH%" "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%"
 if errorlevel 1 (
   echo git checkout failed in publish checkout.
+  popd >nul
+  popd >nul
+  goto :error_exit
+)
+"%GIT_EXE%" reset --hard "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
+if errorlevel 1 (
+  echo git reset failed in publish checkout.
   popd >nul
   popd >nul
   goto :error_exit
@@ -129,33 +139,7 @@ if errorlevel 1 (
 
 "%GIT_EXE%" diff --cached --quiet
 if not errorlevel 1 (
-  for /f "tokens=1,2" %%I in ('"%GIT_EXE%" rev-list --left-right --count HEAD...origin/%GITHUB_BRANCH% 2^>nul') do (
-    set "AHEAD_COUNT=%%I"
-    set "BEHIND_COUNT=%%J"
-  )
-  if not defined AHEAD_COUNT set "AHEAD_COUNT=0"
-  if not defined BEHIND_COUNT set "BEHIND_COUNT=0"
-  echo.
-  if not "%AHEAD_COUNT%"=="0" (
-    echo No new staged changes, but the publish checkout is ahead of origin/%GITHUB_BRANCH% by %AHEAD_COUNT% commit^(s^).
-    echo Pushing existing unpublished commit^(s^)...
-    "%GIT_EXE%" push origin "%GITHUB_BRANCH%"
-    if errorlevel 1 (
-      echo git push failed.
-      popd >nul
-      popd >nul
-      goto :error_exit
-    )
-    "%GIT_EXE%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" HEAD >nul 2>nul
-    call :sync_working_checkout
-    echo.
-    echo Push successful. Latest commit:
-    "%GIT_EXE%" log --oneline -1
-    popd >nul
-    popd >nul
-    goto :success_exit
-  )
-  echo No staged changes to commit and no unpublished commits to push.
+  echo No publishable changes detected. The curated export already matches origin/%GITHUB_BRANCH%.
   popd >nul
   popd >nul
   goto :success_exit
@@ -203,6 +187,27 @@ if errorlevel 1 (
 
 echo.
 echo Pushing to origin %GITHUB_BRANCH%...
+"%GIT_EXE%" fetch --prune origin "+refs/heads/%GITHUB_BRANCH%:refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
+if errorlevel 1 (
+  echo Warning: failed to refresh origin/%GITHUB_BRANCH% before push.
+  popd >nul
+  popd >nul
+  goto :error_exit
+)
+set "PUBLISH_AHEAD_COUNT=0"
+set "PUBLISH_BEHIND_COUNT=0"
+for /f "tokens=1,2" %%I in ('"%GIT_EXE%" rev-list --left-right --count HEAD...refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH% 2^>nul') do (
+  set "PUBLISH_AHEAD_COUNT=%%I"
+  set "PUBLISH_BEHIND_COUNT=%%J"
+)
+if not "%PUBLISH_BEHIND_COUNT%"=="0" (
+  echo Warning: origin/%GITHUB_BRANCH% changed while preparing this publish.
+  echo Publish checkout is ahead by %PUBLISH_AHEAD_COUNT% commit^(s^) and behind by %PUBLISH_BEHIND_COUNT% commit^(s^).
+  echo Rerun push-repo.bat so the publish checkout can rebuild from the latest remote branch.
+  popd >nul
+  popd >nul
+  goto :error_exit
+)
 "%GIT_EXE%" push origin "%GITHUB_BRANCH%"
 if errorlevel 1 (
   echo git push failed.
@@ -226,12 +231,12 @@ for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" branch --show-current 2^>
 if not defined WORKING_BRANCH goto :eof
 if /I not "%WORKING_BRANCH%"=="%GITHUB_BRANCH%" goto :eof
 
-"%GIT_EXE%" -C "%REPO_ROOT%" fetch "%PUBLISH_CHECKOUT%" "%GITHUB_BRANCH%" >nul 2>nul
+"%GIT_EXE%" -C "%REPO_ROOT%" fetch --prune "%GITHUB_REMOTE%" "+refs/heads/%GITHUB_BRANCH%:refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 goto :eof
 
 set "WORKING_AHEAD_COUNT="
 set "WORKING_BEHIND_COUNT="
-for /f "tokens=1,2" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-list --left-right --count HEAD...FETCH_HEAD 2^>nul') do (
+for /f "tokens=1,2" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-list --left-right --count HEAD...refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH% 2^>nul') do (
   set "WORKING_AHEAD_COUNT=%%I"
   set "WORKING_BEHIND_COUNT=%%J"
 )
@@ -275,7 +280,7 @@ if /I not "%WORKING_BRANCH%"=="%GITHUB_BRANCH%" (
   goto :eof
 )
 
-"%GIT_EXE%" -C "%REPO_ROOT%" fetch "%PUBLISH_CHECKOUT%" "%GITHUB_BRANCH%" >nul 2>nul
+"%GIT_EXE%" -C "%REPO_ROOT%" fetch --prune "%GITHUB_REMOTE%" "+refs/heads/%GITHUB_BRANCH%:refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 (
   echo.
   echo Warning: failed to fetch the published branch back into the working checkout.
@@ -283,11 +288,10 @@ if errorlevel 1 (
 )
 
 for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-parse HEAD 2^>nul') do set "WORKING_HEAD=%%I"
-for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-parse FETCH_HEAD 2^>nul') do set "PUBLISHED_HEAD=%%I"
+for /f "delims=" %%I in ('"%GIT_EXE%" -C "%REPO_ROOT%" rev-parse "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" 2^>nul') do set "PUBLISHED_HEAD=%%I"
 if not defined WORKING_HEAD goto :eof
 if not defined PUBLISHED_HEAD goto :eof
 if /I "%WORKING_HEAD%"=="%PUBLISHED_HEAD%" (
-  "%GIT_EXE%" -C "%REPO_ROOT%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" FETCH_HEAD >nul 2>nul
   goto :eof
 )
 
@@ -304,12 +308,11 @@ if errorlevel 1 (
 )
 
 echo Syncing the working checkout to the published branch...
-"%GIT_EXE%" -C "%REPO_ROOT%" reset --hard FETCH_HEAD >nul 2>nul
+"%GIT_EXE%" -C "%REPO_ROOT%" reset --hard "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" >nul 2>nul
 if errorlevel 1 (
   echo Warning: failed to realign the working checkout after publish.
   goto :eof
 )
-"%GIT_EXE%" -C "%REPO_ROOT%" update-ref "refs/remotes/%GITHUB_REMOTE%/%GITHUB_BRANCH%" FETCH_HEAD >nul 2>nul
 echo Working checkout is now aligned to the published commit.
 goto :eof
 
