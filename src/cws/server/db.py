@@ -85,6 +85,12 @@ class ServerDatabase:
                     created_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_checkpoints_superproject_thread_revision
+                    ON checkpoints (superproject_slug, thread_id, revision DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_backups_superproject_created
+                    ON backups (superproject_slug, created_at DESC);
                 """
             )
 

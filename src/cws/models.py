@@ -177,6 +177,14 @@ class CreateSuperprojectResponse(BaseModel):
     manifest: SuperprojectManifest
 
 
+class RenameSuperprojectRequest(BaseModel):
+    name: str
+
+
+class RenameSuperprojectResponse(BaseModel):
+    manifest: SuperprojectManifest
+
+
 class PushCheckpointRequest(BaseModel):
     checkpoint: ThreadCheckpoint
     override: bool = False
@@ -217,6 +225,7 @@ class BackupRecord(BaseModel):
 class ClientSuperprojectState(BaseModel):
     slug: str
     name: str
+    name_manually_set: bool = False
     managed_root: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
     tracked_thread_ids: list[str] = Field(default_factory=list)

@@ -31,6 +31,7 @@ from cws.models import (
     RawFileArtifact,
     RegisterDeviceRequest,
     RegisterDeviceResponse,
+    RenameSuperprojectResponse,
     SuperprojectManifest,
     ThreadSummary,
     ThreadCheckpoint,
@@ -52,6 +53,8 @@ from cws.utils import (
 
 class ServerService:
     heartbeat_timeout_seconds = int(os.environ.get("CWS_HEARTBEAT_TIMEOUT_SECONDS", "120"))
+    checkpoint_retention_per_thread = int(os.environ.get("CWS_CHECKPOINT_RETENTION_PER_THREAD", "20"))
+    backup_retention_per_superproject = int(os.environ.get("CWS_BACKUP_RETENTION_PER_SUPERPROJECT", "20"))
 
     def __init__(self, paths: ServerPaths | None = None) -> None:
         if paths is None:
@@ -337,6 +340,20 @@ class ServerService:
             )
             connection.commit()
         return CreateSuperprojectResponse(manifest=manifest)
+
+    def rename_superproject(self, slug: str, new_name: str) -> RenameSuperprojectResponse:
+        cleaned_name = new_name.strip()
+        if not cleaned_name:
+            raise ValueError("Superproject name cannot be empty.")
+        manifest = self.get_manifest(slug)
+        updated_manifest = manifest.model_copy(
+            update={
+                "name": cleaned_name,
+                "updated_at": utc_now(),
+            }
+        )
+        self._save_manifest(updated_manifest)
+        return RenameSuperprojectResponse(manifest=updated_manifest)
 
     def get_manifest(self, slug: str) -> SuperprojectManifest:
         with self.db.connect() as connection:
@@ -710,6 +727,110 @@ class ServerService:
         target_path = self._superproject_root(superproject_slug) / document.record.relative_path
         atomic_write_text(target_path, document.content)
 
+    @staticmethod
+    def _checkpoint_dir_name(thread_id: str | None) -> str:
+        return thread_id or "default"
+
+    def _checkpoint_json_path(self, slug: str, thread_id: str | None, revision: int) -> Path:
+        return (
+            self._superproject_root(slug)
+            / "threads"
+            / self._checkpoint_dir_name(thread_id)
+            / "checkpoints"
+            / f"{revision}.json"
+        )
+
+    def _prune_checkpoint_history(self, slug: str) -> None:
+        keep_count = max(1, self.checkpoint_retention_per_thread)
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT checkpoint_id, thread_id, revision, canonical, payload_json
+                FROM checkpoints
+                WHERE superproject_slug = ?
+                ORDER BY revision DESC
+                """,
+                (slug,),
+            ).fetchall()
+
+            retained_checkpoints: list[ThreadCheckpoint] = []
+            delete_rows: list[tuple[str, str | None, int]] = []
+            seen_per_bucket: dict[tuple[str, int], int] = {}
+            for row in rows:
+                thread_key = row["thread_id"] or "__default__"
+                canonical = int(row["canonical"])
+                bucket = (thread_key, canonical)
+                bucket_limit = keep_count if canonical else 1
+                count = seen_per_bucket.get(bucket, 0)
+                if count < bucket_limit:
+                    seen_per_bucket[bucket] = count + 1
+                    retained_checkpoints.append(ThreadCheckpoint.model_validate(json.loads(row["payload_json"])))
+                    continue
+                delete_rows.append((row["checkpoint_id"], row["thread_id"], row["revision"]))
+
+            if delete_rows:
+                connection.executemany(
+                    "DELETE FROM checkpoints WHERE checkpoint_id = ?",
+                    [(checkpoint_id,) for checkpoint_id, _, _ in delete_rows],
+                )
+                connection.commit()
+
+        for _, thread_id, revision in delete_rows:
+            checkpoint_path = self._checkpoint_json_path(slug, thread_id, revision)
+            if checkpoint_path.exists():
+                checkpoint_path.unlink()
+
+        retained_raw_bundle_ids = {
+            checkpoint.raw_bundle.bundle_id
+            for checkpoint in retained_checkpoints
+            if checkpoint.raw_bundle is not None
+        }
+        retained_shared_bundle_ids = {
+            checkpoint.shared_bundle.bundle_id
+            for checkpoint in retained_checkpoints
+            if checkpoint.shared_bundle is not None
+        }
+        raw_root = self._superproject_root(slug) / "raw_codex"
+        if raw_root.exists():
+            for path in raw_root.glob("*.json"):
+                if path.stem not in retained_raw_bundle_ids:
+                    path.unlink()
+        shared_root = raw_root / "shared"
+        if shared_root.exists():
+            for path in shared_root.glob("*.json"):
+                if path.stem not in retained_shared_bundle_ids:
+                    path.unlink()
+
+    def _prune_backups(self, slug: str) -> None:
+        keep_count = max(1, self.backup_retention_per_superproject)
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT backup_id
+                FROM backups
+                WHERE superproject_slug = ?
+                ORDER BY created_at DESC
+                """,
+                (slug,),
+            ).fetchall()
+            delete_ids = [row["backup_id"] for row in rows[keep_count:]]
+            if delete_ids:
+                connection.executemany(
+                    "DELETE FROM backups WHERE backup_id = ?",
+                    [(backup_id,) for backup_id in delete_ids],
+                )
+                connection.commit()
+
+        backup_root = self._superproject_root(slug) / "backups"
+        for backup_id in delete_ids:
+            backup_path = backup_root / f"{backup_id}.json"
+            if backup_path.exists():
+                backup_path.unlink()
+
+    def _prune_superproject_state(self, slug: str) -> None:
+        self._prune_checkpoint_history(slug)
+        self._prune_backups(slug)
+
     def push_checkpoint(
         self,
         device_id: str,
@@ -721,6 +842,16 @@ class ServerService:
         current_manifest = self.get_manifest(request.checkpoint.superproject_slug)
         incoming_manifest = request.checkpoint.manifest
         self._reject_suspicious_manifest_change(current_manifest, incoming_manifest)
+        if not request.override and request.checkpoint.canonical:
+            latest_checkpoint = self._latest_checkpoint(
+                request.checkpoint.superproject_slug,
+                request.checkpoint.thread_id,
+            )
+            if latest_checkpoint is not None and latest_checkpoint.snapshot_hash == request.checkpoint.snapshot_hash:
+                return PushCheckpointResponse(
+                    accepted=True,
+                    revision=latest_checkpoint.revision,
+                )
         backup = (
             self._create_backup(
                 request.checkpoint.superproject_slug,
@@ -804,6 +935,7 @@ class ServerService:
                 ),
             )
             connection.commit()
+        self._prune_superproject_state(checkpoint.superproject_slug)
         return PushCheckpointResponse(
             accepted=True,
             revision=revision,

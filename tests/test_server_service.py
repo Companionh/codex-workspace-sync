@@ -103,6 +103,23 @@ def test_create_superproject_scaffolds_expected_directories(tmp_path: Path) -> N
     assert len(manifest.managed_files) >= 4
 
 
+def test_rename_superproject_updates_manifest_name(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    )
+
+    response = service.rename_superproject("telegram-suite", "My Custom Suite")
+
+    manifest = service.get_manifest("telegram-suite")
+    assert response.manifest.name == "My Custom Suite"
+    assert manifest.name == "My Custom Suite"
+
+
 def test_push_checkpoint_rejects_missing_protected_file(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     device = service.register_device(
@@ -148,6 +165,132 @@ def test_push_checkpoint_rejects_missing_protected_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         service.push_checkpoint(device.device.device_id, request)
+
+
+def test_push_checkpoint_deduplicates_identical_canonical_payloads(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+    documents = [ManagedDocument(record=record, content="replacement") for record in manifest.managed_files]
+
+    checkpoint = ThreadCheckpoint(
+        superproject_slug="telegram-suite",
+        thread_id="thread-a",
+        revision=0,
+        created_at=utc_now(),
+        source_device_id=device.device.device_id,
+        canonical=True,
+        base_revision=manifest.revision,
+        turn_hashes=["turn-a"],
+        summary="thread-a",
+        manifest=manifest.model_copy(update={"managed_files": [doc.record for doc in documents]}),
+        managed_documents=[],
+        raw_bundle=RawSessionBundle(
+            captured_at=utc_now(),
+            thread_id="thread-a",
+            session_ids=["thread-a"],
+            files=[
+                RawFileArtifact(
+                    relative_path="sessions/2026/03/17/thread-a.jsonl",
+                    sha256="session-a",
+                    content_b64="dGhyZWFkLWE=",
+                )
+            ],
+        ),
+        snapshot_hash="snapshot-thread-a",
+    )
+
+    first = service.push_checkpoint(device.device.device_id, PushCheckpointRequest(checkpoint=checkpoint))
+    second = service.push_checkpoint(device.device.device_id, PushCheckpointRequest(checkpoint=checkpoint))
+
+    assert first.revision == 1
+    assert second.revision == 1
+    with service.db.connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM checkpoints WHERE superproject_slug = ? AND thread_id = ?",
+            ("telegram-suite", "thread-a"),
+        ).fetchone()
+    assert row["count"] == 1
+
+
+def test_push_checkpoint_prunes_old_history_and_raw_bundles(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.checkpoint_retention_per_thread = 2
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+
+    for index in range(3):
+        checkpoint = ThreadCheckpoint(
+            checkpoint_id=f"checkpoint-{index}",
+            superproject_slug="telegram-suite",
+            thread_id="thread-a",
+            revision=0,
+            created_at=utc_now(),
+            source_device_id=device.device.device_id,
+            canonical=True,
+            base_revision=manifest.revision + index,
+            turn_hashes=[f"turn-{index}"],
+            summary="thread-a",
+            manifest=manifest,
+            managed_documents=[],
+            raw_bundle=RawSessionBundle(
+                bundle_id=f"bundle-{index}",
+                captured_at=utc_now(),
+                thread_id="thread-a",
+                session_ids=["thread-a"],
+                files=[
+                    RawFileArtifact(
+                        relative_path=f"sessions/2026/03/17/thread-a-{index}.jsonl",
+                        sha256=f"session-{index}",
+                        content_b64=encode_b64(f"thread-a-{index}".encode("utf-8")),
+                    )
+                ],
+            ),
+            snapshot_hash=f"snapshot-thread-a-{index}",
+        )
+        service.push_checkpoint(device.device.device_id, PushCheckpointRequest(checkpoint=checkpoint))
+        manifest = service.get_manifest("telegram-suite")
+
+    with service.db.connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT revision
+            FROM checkpoints
+            WHERE superproject_slug = ? AND thread_id = ?
+            ORDER BY revision
+            """,
+            ("telegram-suite", "thread-a"),
+        ).fetchall()
+
+    assert [row["revision"] for row in rows] == [2, 3]
+    assert not (tmp_path / "state" / "superprojects" / "telegram-suite" / "threads" / "thread-a" / "checkpoints" / "1.json").exists()
+    assert not (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / "bundle-0.json").exists()
+    assert (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / "bundle-1.json").exists()
+    assert (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / "bundle-2.json").exists()
 
 
 def test_pull_state_returns_latest_checkpoint_per_thread(tmp_path: Path) -> None:

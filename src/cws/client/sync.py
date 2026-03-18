@@ -501,6 +501,27 @@ class ClientService:
         self.save_config(config)
         return thread.model_copy(update={"tracked": True})
 
+    @staticmethod
+    def _adopt_server_name(local_state: ClientSuperprojectState, server_name: str) -> None:
+        if not local_state.name or not local_state.name_manually_set:
+            local_state.name = server_name
+
+    def rename_superproject(self, slug: str, new_name: str) -> dict[str, Any]:
+        cleaned_name = new_name.strip()
+        if not cleaned_name:
+            raise RuntimeError("Superproject name cannot be empty.")
+        manifest = self.api_client().rename_superproject(slug, cleaned_name).manifest
+        local_state = self._get_superproject_state(slug)
+        local_state.name = manifest.name
+        local_state.name_manually_set = True
+        config = self.config()
+        config.superprojects[slug] = local_state
+        self.save_config(config)
+        return {
+            "slug": slug,
+            "name": manifest.name,
+        }
+
     def create_superproject(
         self,
         *,
@@ -529,6 +550,7 @@ class ClientService:
         config.superprojects[slug] = ClientSuperprojectState(
             slug=slug,
             name=name,
+            name_manually_set=True,
             managed_root=str(managed_root),
             workspace_roots=[str(path) for path in workspace_roots],
         )
@@ -554,7 +576,7 @@ class ClientService:
                 name=server_state.manifest.name,
             )
         local_state.slug = server_state.manifest.slug
-        local_state.name = server_state.manifest.name
+        self._adopt_server_name(local_state, server_state.manifest.name)
         local_state.managed_root = str(managed_root)
         local_state.workspace_roots = [str(path) for path in workspace_roots]
         config.superprojects[slug] = local_state
@@ -795,6 +817,7 @@ class ClientService:
         self.report_progress(f"Connecting to the server for '{slug}'...")
         managed_root = Path(local_state.managed_root)
         server_state = self.api_client().pull_state(slug)
+        self._adopt_server_name(local_state, server_state.manifest.name)
         self.report_progress(f"Comparing local Markdown for '{slug}' with the server copy...")
         server_by_path = {
             document.record.relative_path: document.record

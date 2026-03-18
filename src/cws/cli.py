@@ -200,6 +200,14 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         thread = client.add_thread(slug, thread_ref)
         typer.echo(json.dumps(thread.model_dump(mode="json"), indent=2))
         return
+    if command == "rename-superproject":
+        slug = _resolve_shell_superproject(args)
+        positional = _positional_args(args)
+        if len(positional) < 2:
+            raise RuntimeError("Missing new superproject name")
+        new_name = " ".join(positional[1:])
+        typer.echo(json.dumps(client.rename_superproject(slug, new_name), indent=2))
+        return
     if command == "override-current-state":
         slug = _resolve_shell_superproject(args)
         thread_id = arg_value("--thread", required=False)
@@ -351,6 +359,16 @@ def addthread(
 ) -> None:
     slug = _resolve_cli_superproject(superproject, superproject_option)
     typer.echo(json.dumps(service().add_thread(slug, thread_ref).model_dump(mode="json"), indent=2))
+
+
+@app.command("rename-superproject")
+def rename_superproject(
+    superproject: str | None = typer.Argument(None),
+    new_name: str = typer.Argument(...),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps(service().rename_superproject(slug, new_name), indent=2))
 
 
 @app.command("override-current-state")

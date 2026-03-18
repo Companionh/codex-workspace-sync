@@ -16,6 +16,8 @@ from cws.models import (
     PullStateResponse,
     PushCheckpointRequest,
     PushCheckpointResponse,
+    RenameSuperprojectRequest,
+    RenameSuperprojectResponse,
     SuperprojectManifest,
     ThreadSummary,
     ThreadCheckpoint,
@@ -71,6 +73,15 @@ class ApiClient:
     def create_superproject(self, request: CreateSuperprojectRequest) -> CreateSuperprojectResponse:
         response = self._request("POST", "/api/superprojects", json=request.model_dump(mode="json"))
         return CreateSuperprojectResponse.model_validate(response.json())
+
+    def rename_superproject(self, slug: str, name: str) -> RenameSuperprojectResponse:
+        payload = RenameSuperprojectRequest(name=name)
+        response = self._request(
+            "POST",
+            f"/api/superprojects/{slug}/rename",
+            json=payload.model_dump(mode="json"),
+        )
+        return RenameSuperprojectResponse.model_validate(response.json())
 
     def pull_state(self, slug: str) -> PullStateResponse:
         response = self._request("GET", f"/api/superprojects/{slug}/state")

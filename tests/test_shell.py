@@ -37,6 +37,10 @@ class _RecordingService:
         self.calls.append(("add_thread", (slug, thread_ref)))
         return type("Thread", (), {"model_dump": lambda self, mode="json": {"thread_id": "thread-a"}})()
 
+    def rename_superproject(self, slug: str, new_name: str):
+        self.calls.append(("rename_superproject", (slug, new_name)))
+        return {"slug": slug, "name": new_name}
+
     def force_thread_updates(self, slug: str, *, steal: bool = False):
         self.calls.append(("force_thread_updates", (slug, steal)))
         return [{"thread_id": "thread-a", "revision": 7}]
@@ -104,6 +108,16 @@ def test_run_shell_command_adds_thread_by_name(capsys) -> None:
     captured = capsys.readouterr()
     assert service.calls == [("add_thread", ("telegram-bots-suite", "Clone Companionh repos"))]
     assert '"thread_id": "thread-a"' in captured.out
+
+
+def test_run_shell_command_renames_superproject(capsys) -> None:
+    service = _RecordingService()
+
+    run_shell_command(service, "rename-superproject", ["telegram-bots-suite", "Telegram", "Bots", "Suite"])
+
+    captured = capsys.readouterr()
+    assert service.calls == [("rename_superproject", ("telegram-bots-suite", "Telegram Bots Suite"))]
+    assert '"name": "Telegram Bots Suite"' in captured.out
 
 
 def test_run_shell_command_force_pushes_tracked_threads(capsys) -> None:

@@ -17,6 +17,8 @@ from cws.models import (
     PullStateResponse,
     PushCheckpointRequest,
     PushCheckpointResponse,
+    RenameSuperprojectRequest,
+    RenameSuperprojectResponse,
     ResolveMismatchRequest,
     SuperprojectManifest,
     ThreadSummary,
@@ -99,6 +101,20 @@ def create_app() -> FastAPI:
         try:
             return service.create_superproject(request)
         except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/superprojects/{slug}/rename", response_model=RenameSuperprojectResponse)
+    def rename_superproject(
+        slug: str,
+        request: RenameSuperprojectRequest,
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> RenameSuperprojectResponse:
+        try:
+            return service.rename_superproject(slug, request.name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/superprojects/{slug}/state", response_model=PullStateResponse)

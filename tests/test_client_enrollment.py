@@ -1239,6 +1239,103 @@ def test_attach_superproject_registers_local_state_and_pulls_server_docs(tmp_pat
     assert (managed_root / "baseline" / "base_rules.md").read_text(encoding="utf-8") == "# server\n"
 
 
+def test_attach_superproject_preserves_manual_local_name(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="My Custom Suite",
+                    name_manually_set=True,
+                    managed_root=str(managed_root),
+                )
+            }
+        )
+    )
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    server_state = PullStateResponse(
+        manifest=SuperprojectManifest(
+            slug="telegram-bots-suite",
+            name="Telegram Bots Suite",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            managed_files=[server_document.record],
+        ),
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=None,
+        pending_resolutions=[],
+    )
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    service.attach_superproject(
+        "telegram-bots-suite",
+        managed_root=managed_root,
+        workspace_roots=[workspace_root],
+        assume_yes=True,
+    )
+
+    updated_state = state_store.load_config().superprojects["telegram-bots-suite"]
+    assert updated_state.name == "My Custom Suite"
+    assert updated_state.name_manually_set is True
+
+
+def test_rename_superproject_updates_local_state(tmp_path) -> None:
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="Telegram Bots Suite",
+                )
+            }
+        )
+    )
+
+    class _RenameApiClient:
+        def rename_superproject(self, slug: str, name: str):
+            return type(
+                "Response",
+                (),
+                {
+                    "manifest": SuperprojectManifest(
+                        slug=slug,
+                        name=name,
+                        created_at=utc_now(),
+                        updated_at=utc_now(),
+                    )
+                },
+            )()
+
+    service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
+    service.api_client = lambda: _RenameApiClient()  # type: ignore[method-assign]
+
+    payload = service.rename_superproject("telegram-bots-suite", "My Custom Suite")
+
+    updated_state = state_store.load_config().superprojects["telegram-bots-suite"]
+    assert payload == {"slug": "telegram-bots-suite", "name": "My Custom Suite"}
+    assert updated_state.name == "My Custom Suite"
+    assert updated_state.name_manually_set is True
+
+
 def test_update_from_server_reports_attach_hint_for_unknown_local_superproject(tmp_path) -> None:
     state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
     state_store.save_config(ClientConfig())
