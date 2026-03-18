@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cws.client.codex import build_managed_documents, build_raw_session_bundle, extract_turn_hashes, list_local_threads
+from cws.client.codex import (
+    build_managed_documents,
+    build_raw_session_bundle,
+    build_shared_codex_bundle,
+    extract_turn_hashes,
+    list_local_threads,
+)
 from cws.utils import atomic_write_bytes
 
 
@@ -99,12 +105,17 @@ def test_raw_bundle_collects_matching_sessions_and_turn_hashes(tmp_path: Path) -
     assert bundle.session_ids == ["thread-1"]
     assert any(artifact.relative_path.endswith("rollout-abc.jsonl") for artifact in bundle.files)
     assert not any(artifact.relative_path.endswith("rollout-def.jsonl") for artifact in bundle.files)
-    assert any(artifact.relative_path == "skills/custom-skill/SKILL.md" for artifact in bundle.files)
+    assert all(not artifact.relative_path.startswith("skills/") for artifact in bundle.files)
+    assert len(hashes) == 2
+
+    shared_bundle = build_shared_codex_bundle(codex_root)
+
+    assert any(artifact.relative_path == "skills/custom-skill/SKILL.md" for artifact in shared_bundle.files)
     assert any(
         artifact.relative_path == "vendor_imports/skills/vendor-skill/SKILL.md"
-        for artifact in bundle.files
+        for artifact in shared_bundle.files
     )
-    assert len(hashes) == 2
+    assert any(artifact.relative_path == "session_index.jsonl" for artifact in shared_bundle.files)
 
 
 def test_list_local_threads_prefers_codex_thread_name(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ from cws.models import (
     ManagedDocument,
     ManagedFileClass,
     ManagedFileRecord,
+    RawCodexSharedBundle,
     RawFileArtifact,
     RawSessionBundle,
     ThreadSummary,
@@ -334,31 +335,6 @@ def build_raw_session_bundle(
                 content_b64=encode_b64(path.read_bytes()),
             )
         )
-    shared_files = [
-        codex_root / "session_index.jsonl",
-        codex_root / "config.toml",
-        codex_root / "models_cache.json",
-    ]
-    shared_files.extend(codex_root.glob("state_*.sqlite*"))
-    shared_files.extend(codex_root.glob("logs_*.sqlite*"))
-    for path in shared_files:
-        if not path.exists():
-            continue
-        files.append(
-            RawFileArtifact(
-                relative_path=relative_posix(path, codex_root),
-                sha256=sha256_file(path),
-                content_b64=encode_b64(path.read_bytes()),
-            )
-        )
-    for path in _iter_skill_files(codex_root):
-        files.append(
-            RawFileArtifact(
-                relative_path=relative_posix(path, codex_root),
-                sha256=sha256_file(path),
-                content_b64=encode_b64(path.read_bytes()),
-            )
-        )
     bundle_thread_id = thread_id or (session_ids[-1] if session_ids else None)
     return RawSessionBundle(
         captured_at=utc_now(),
@@ -369,3 +345,26 @@ def build_raw_session_bundle(
         session_ids=session_ids,
         files=files,
     )
+
+
+def build_shared_codex_bundle(codex_root: Path) -> RawCodexSharedBundle:
+    files: list[RawFileArtifact] = []
+    shared_files = [
+        codex_root / "session_index.jsonl",
+        codex_root / "config.toml",
+        codex_root / "models_cache.json",
+    ]
+    shared_files.extend(sorted(codex_root.glob("state_*.sqlite*")))
+    shared_files.extend(sorted(codex_root.glob("logs_*.sqlite*")))
+    shared_files.extend(_iter_skill_files(codex_root))
+    for path in shared_files:
+        if not path.exists():
+            continue
+        files.append(
+            RawFileArtifact(
+                relative_path=relative_posix(path, codex_root),
+                sha256=sha256_file(path),
+                content_b64=encode_b64(path.read_bytes()),
+            )
+        )
+    return RawCodexSharedBundle(captured_at=utc_now(), files=files)

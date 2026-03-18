@@ -19,6 +19,7 @@ from cws.models import (
     OutboundQueueItem,
     PullStateResponse,
     PushCheckpointResponse,
+    RawCodexSharedBundle,
     RawFileArtifact,
     RawSessionBundle,
     SuperprojectManifest,
@@ -292,11 +293,6 @@ def test_update_from_server_applies_latest_checkpoint_per_thread(tmp_path) -> No
                     sha256="session-a",
                     content_b64=encode_b64(b"thread-a-session"),
                 ),
-                RawFileArtifact(
-                    relative_path="session_index.jsonl",
-                    sha256="index-old",
-                    content_b64=encode_b64(b"old-index"),
-                ),
             ],
         ),
         snapshot_hash="snapshot-thread-a",
@@ -314,11 +310,9 @@ def test_update_from_server_applies_latest_checkpoint_per_thread(tmp_path) -> No
         summary="default",
         manifest=manifest,
         managed_documents=[server_document],
-        raw_bundle=RawSessionBundle(
+        shared_bundle=RawCodexSharedBundle(
             bundle_id="bundle-default",
             captured_at=utc_now(),
-            thread_id=None,
-            session_ids=[],
             files=[
                 RawFileArtifact(
                     relative_path="session_index.jsonl",
@@ -334,6 +328,7 @@ def test_update_from_server_applies_latest_checkpoint_per_thread(tmp_path) -> No
         managed_documents=[server_document],
         shared_skills=[],
         latest_checkpoint=default_checkpoint,
+        shared_checkpoint=default_checkpoint,
         thread_checkpoints=[explicit_thread_checkpoint, default_checkpoint],
         pending_resolutions=[],
     )
@@ -351,9 +346,10 @@ def test_update_from_server_applies_latest_checkpoint_per_thread(tmp_path) -> No
     assert (codex_root / "session_index.jsonl").read_text(encoding="utf-8") == "new-index"
     assert updated_state.pending_thread_refreshes["thread-a"] == 4
     assert updated_state.pending_thread_refreshes["thread-b"] == 4
+    assert updated_state.last_shared_bundle_revision == 8
 
 
-def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypatch, tmp_path) -> None:
+def test_build_checkpoint_snapshot_hash_ignores_volatile_shared_runtime_artifacts(monkeypatch, tmp_path) -> None:
     managed_root = tmp_path / "managed"
     baseline_path = managed_root / "baseline" / "base_rules.md"
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,20 +403,13 @@ def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypat
     service = ClientService(state_store=state_store, codex_root=tmp_path / ".codex")
     service.api_client = lambda: _ManifestOnlyApiClient()  # type: ignore[method-assign]
 
-    raw_bundle_a = RawSessionBundle(
+    shared_bundle_a = RawCodexSharedBundle(
         captured_at=utc_now(),
-        thread_id="thread-a",
-        session_ids=["thread-a"],
         files=[
             RawFileArtifact(
-                relative_path="sessions/2026/03/17/thread-a.jsonl",
-                sha256="session-sha",
-                content_b64=encode_b64(b"thread-a"),
-            ),
-            RawFileArtifact(
                 relative_path="session_index.jsonl",
-                sha256="index-old",
-                content_b64=encode_b64(b"old-index"),
+                sha256="index-sha",
+                content_b64=encode_b64(b"shared-index"),
             ),
             RawFileArtifact(
                 relative_path="state_5.sqlite-wal",
@@ -429,20 +418,13 @@ def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypat
             ),
         ],
     )
-    raw_bundle_b = RawSessionBundle(
+    shared_bundle_b = RawCodexSharedBundle(
         captured_at=utc_now(),
-        thread_id="thread-a",
-        session_ids=["thread-a"],
         files=[
             RawFileArtifact(
-                relative_path="sessions/2026/03/17/thread-a.jsonl",
-                sha256="session-sha",
-                content_b64=encode_b64(b"thread-a"),
-            ),
-            RawFileArtifact(
                 relative_path="session_index.jsonl",
-                sha256="index-new",
-                content_b64=encode_b64(b"new-index"),
+                sha256="index-sha",
+                content_b64=encode_b64(b"shared-index"),
             ),
             RawFileArtifact(
                 relative_path="state_5.sqlite-wal",
@@ -451,20 +433,18 @@ def test_build_checkpoint_snapshot_hash_ignores_volatile_raw_artifacts(monkeypat
             ),
         ],
     )
-    bundles = iter([raw_bundle_a, raw_bundle_b])
-    monkeypatch.setattr("cws.client.sync.build_raw_session_bundle", lambda *_args, **_kwargs: next(bundles))
+    bundles = iter([shared_bundle_a, shared_bundle_b])
+    monkeypatch.setattr("cws.client.sync.build_shared_codex_bundle", lambda *_args, **_kwargs: next(bundles))
 
     checkpoint_a = service.build_checkpoint(
         "telegram-bots-suite",
         canonical=True,
         show_progress=False,
-        thread_id="thread-a",
     )
     checkpoint_b = service.build_checkpoint(
         "telegram-bots-suite",
         canonical=True,
         show_progress=False,
-        thread_id="thread-a",
     )
 
     assert checkpoint_a.snapshot_hash == checkpoint_b.snapshot_hash
@@ -861,6 +841,226 @@ def test_update_from_server_reports_updated_thread_ids(tmp_path) -> None:
     ]
 
 
+def test_update_from_server_skips_already_applied_thread_revisions(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    managed_root=str(managed_root),
+                    managed_file_ids={"baseline/base_rules.md": "server-file-id"},
+                    pending_thread_refreshes={"thread-a": 6, "thread-b": 6},
+                )
+            }
+        )
+    )
+
+    server_document = ManagedDocument(
+        record=ManagedFileRecord(
+            file_id="server-file-id",
+            relative_path="baseline/base_rules.md",
+            sha256="unused",
+            size_bytes=len("# server\n"),
+            line_count=1,
+            classification=ManagedFileClass.PROTECTED,
+        ),
+        content="# server\n",
+    )
+    manifest = SuperprojectManifest(
+        slug="telegram-bots-suite",
+        name="telegram-bots-suite",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        revision=6,
+        managed_files=[server_document.record],
+    )
+    thread_checkpoint = ThreadCheckpoint(
+        checkpoint_id="checkpoint-thread-a",
+        superproject_slug="telegram-bots-suite",
+        thread_id="thread-a",
+        revision=6,
+        created_at=utc_now(),
+        source_device_id="device-a",
+        canonical=True,
+        base_revision=5,
+        turn_hashes=["turn-a"],
+        summary="thread-a",
+        manifest=manifest,
+        managed_documents=[server_document],
+        raw_bundle=RawSessionBundle(
+            bundle_id="bundle-thread-a",
+            captured_at=utc_now(),
+            thread_id="thread-a",
+            session_ids=["thread-a", "thread-b"],
+            files=[
+                RawFileArtifact(
+                    relative_path="sessions/2026/03/17/thread-a.jsonl",
+                    sha256="session-a",
+                    content_b64=encode_b64(b"thread-a-session"),
+                )
+            ],
+        ),
+        snapshot_hash="snapshot-thread-a",
+    )
+    shared_checkpoint = ThreadCheckpoint(
+        checkpoint_id="checkpoint-shared",
+        superproject_slug="telegram-bots-suite",
+        thread_id=None,
+        revision=5,
+        created_at=utc_now(),
+        source_device_id="device-a",
+        canonical=True,
+        base_revision=4,
+        turn_hashes=[],
+        summary="shared runtime",
+        manifest=manifest,
+        managed_documents=[server_document],
+        shared_bundle=RawCodexSharedBundle(
+            bundle_id="bundle-shared",
+            captured_at=utc_now(),
+            files=[
+                RawFileArtifact(
+                    relative_path="session_index.jsonl",
+                    sha256="index",
+                    content_b64=encode_b64(b"new-index"),
+                )
+            ],
+        ),
+        snapshot_hash="snapshot-shared",
+    )
+    server_state = PullStateResponse(
+        manifest=manifest,
+        managed_documents=[server_document],
+        shared_skills=[],
+        latest_checkpoint=thread_checkpoint,
+        shared_checkpoint=shared_checkpoint,
+        thread_checkpoints=[thread_checkpoint],
+        pending_resolutions=[],
+    )
+    progress_messages: list[str] = []
+    service = ClientService(
+        state_store=state_store,
+        codex_root=tmp_path / ".codex",
+        progress_callback=progress_messages.append,
+    )
+    service.api_client = lambda: _FakeApiClient(server_state)  # type: ignore[method-assign]
+
+    diff = service.update_from_server("telegram-bots-suite", assume_yes=True)
+
+    assert diff.thread_updates == []
+    assert progress_messages == [
+        "Connecting to the server for 'telegram-bots-suite'...",
+        "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
+        "Applying server updates for 'telegram-bots-suite'...",
+        "Syncing shared skills for 'telegram-bots-suite'...",
+        "Applying the shared Codex runtime bundle for 'telegram-bots-suite'...",
+        "Update from server finished for 'telegram-bots-suite'.",
+    ]
+
+
+def test_force_thread_updates_pushes_tracked_threads_and_records_revision(tmp_path) -> None:
+    managed_root = tmp_path / "managed"
+    baseline_path = managed_root / "baseline" / "base_rules.md"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text("# local\n", encoding="utf-8")
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+
+    codex_root = tmp_path / ".codex"
+    session_dir = codex_root / "sessions" / "2026" / "03" / "18"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_dir.joinpath("rollout-thread-a.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "thread-a", "cwd": str(workspace_root)}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "hello world"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    state_store = ClientStateStore(ClientPaths.default(tmp_path / "client"))
+    state_store.save_config(
+        ClientConfig(
+            device_id="device-a",
+            superprojects={
+                "telegram-bots-suite": ClientSuperprojectState(
+                    slug="telegram-bots-suite",
+                    name="telegram-bots-suite",
+                    managed_root=str(managed_root),
+                    workspace_roots=[str(workspace_root)],
+                    tracked_thread_ids=["thread-a"],
+                    managed_file_ids={"baseline/base_rules.md": "server-file-id"},
+                )
+            },
+        )
+    )
+
+    manifest = SuperprojectManifest(
+        slug="telegram-bots-suite",
+        name="telegram-bots-suite",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+        revision=2,
+        managed_files=[
+            ManagedFileRecord(
+                file_id="server-file-id",
+                relative_path="baseline/base_rules.md",
+                sha256="unused",
+                size_bytes=len("# local\n"),
+                line_count=1,
+                classification=ManagedFileClass.PROTECTED,
+            )
+        ],
+    )
+
+    class _ForcePushApiClient:
+        def __init__(self) -> None:
+            self.acquired = 0
+            self.released = 0
+            self.pushed: list[str] = []
+
+        def acquire_lease(self, steal: bool = False):
+            self.acquired += 1
+            return type("Lease", (), {"granted": True, "conflict_device_id": None})()
+
+        def release_lease(self):
+            self.released += 1
+            return None
+
+        def get_manifest(self, _slug: str):
+            return manifest
+
+        def push_checkpoint(self, _slug: str, request):
+            self.pushed.append(request.checkpoint.thread_id)
+            return PushCheckpointResponse(accepted=True, revision=7)
+
+    api = _ForcePushApiClient()
+    service = ClientService(state_store=state_store, codex_root=codex_root)
+    service.api_client = lambda: api  # type: ignore[method-assign]
+
+    pushed = service.force_thread_updates("telegram-bots-suite")
+    updated_state = state_store.load_config().superprojects["telegram-bots-suite"]
+
+    assert pushed == [{"thread_id": "thread-a", "thread_name": "hello world", "revision": 7}]
+    assert api.acquired == 1
+    assert api.released == 1
+    assert api.pushed == ["thread-a"]
+    assert updated_state.pending_thread_refreshes["thread-a"] == 7
+
+
 def test_threadlist_backfills_preview_from_local_thread_cache(tmp_path) -> None:
     codex_root = tmp_path / ".codex"
     session_dir = codex_root / "sessions" / "2026" / "03" / "16"
@@ -918,9 +1118,9 @@ def test_threadlist_backfills_preview_from_local_thread_cache(tmp_path) -> None:
     assert threads[0].tracked is True
 
 
-def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) -> None:
+def test_apply_shared_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) -> None:
     service = ClientService(codex_root=tmp_path / ".codex")
-    bundle = RawSessionBundle(
+    bundle = RawCodexSharedBundle(
         captured_at=utc_now(),
         files=[
             RawFileArtifact(
@@ -934,11 +1134,6 @@ def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) 
                 content_b64=encode_b64(b"volatile"),
             ),
             RawFileArtifact(
-                relative_path="sessions/2026/03/16/test-session.jsonl",
-                sha256="session",
-                content_b64=encode_b64(b"session"),
-            ),
-            RawFileArtifact(
                 relative_path="skills/custom-skill/SKILL.md",
                 sha256="skill",
                 content_b64=encode_b64(b"skill-body"),
@@ -949,18 +1144,15 @@ def test_apply_raw_bundle_skips_locked_runtime_artifacts(monkeypatch, tmp_path) 
     def fake_atomic_write_bytes(path, data):
         if str(path).endswith(".sqlite-shm"):
             raise OSError(22, "Invalid argument")
-        if str(path).endswith("test-session.jsonl"):
-            raise PermissionError(5, "Access is denied")
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(data)
 
     monkeypatch.setattr("cws.client.sync.atomic_write_bytes", fake_atomic_write_bytes)
 
-    service._apply_raw_bundle(bundle)
+    service._apply_shared_bundle(bundle)
 
     assert (tmp_path / ".codex" / "session_index.jsonl").read_text(encoding="utf-8") == "index"
     assert not (tmp_path / ".codex" / "state_5.sqlite-shm").exists()
-    assert not (tmp_path / ".codex" / "sessions" / "2026" / "03" / "16" / "test-session.jsonl").exists()
     assert (tmp_path / ".codex" / "skills" / "custom-skill" / "SKILL.md").read_text(encoding="utf-8") == (
         "skill-body"
     )

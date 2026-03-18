@@ -387,6 +387,22 @@ class ServerService:
             return None
         return ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
 
+    def _latest_shared_checkpoint(self, slug: str) -> ThreadCheckpoint | None:
+        query = """
+            SELECT payload_json
+            FROM checkpoints
+            WHERE superproject_slug = ?
+              AND canonical = 1
+              AND thread_id IS NULL
+            ORDER BY revision DESC
+            LIMIT 1
+        """
+        with self.db.connect() as connection:
+            row = connection.execute(query, (slug,)).fetchone()
+        if row is None:
+            return None
+        return ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
+
     def _latest_thread_checkpoints(self, slug: str) -> list[ThreadCheckpoint]:
         with self.db.connect() as connection:
             rows = connection.execute(
@@ -445,6 +461,7 @@ class ServerService:
         return PullStateResponse(
             manifest=manifest,
             latest_checkpoint=self._latest_checkpoint(slug),
+            shared_checkpoint=self._latest_shared_checkpoint(slug),
             thread_checkpoints=self._latest_thread_checkpoints(slug),
             pending_resolutions=self._pending_resolutions(slug),
             managed_documents=[
@@ -728,6 +745,13 @@ class ServerService:
             dump_json_file(
                 raw_root / f"{checkpoint.raw_bundle.bundle_id}.json",
                 checkpoint.raw_bundle.model_dump(mode="json"),
+            )
+        if checkpoint.shared_bundle is not None:
+            shared_root = self._superproject_root(checkpoint.superproject_slug) / "raw_codex" / "shared"
+            shared_root.mkdir(parents=True, exist_ok=True)
+            dump_json_file(
+                shared_root / f"{checkpoint.shared_bundle.bundle_id}.json",
+                checkpoint.shared_bundle.model_dump(mode="json"),
             )
         thread_dir = (
             self._superproject_root(checkpoint.superproject_slug)

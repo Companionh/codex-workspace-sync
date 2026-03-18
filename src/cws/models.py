@@ -93,6 +93,12 @@ class RawSessionBundle(BaseModel):
     files: list[RawFileArtifact] = Field(default_factory=list)
 
 
+class RawCodexSharedBundle(BaseModel):
+    bundle_id: str = Field(default_factory=lambda: str(uuid4()))
+    captured_at: datetime
+    files: list[RawFileArtifact] = Field(default_factory=list)
+
+
 class ThreadSummary(BaseModel):
     thread_id: str
     thread_name: str
@@ -116,6 +122,7 @@ class ThreadCheckpoint(BaseModel):
     manifest: SuperprojectManifest
     managed_documents: list[ManagedDocument] = Field(default_factory=list)
     raw_bundle: RawSessionBundle | None = None
+    shared_bundle: RawCodexSharedBundle | None = None
     snapshot_hash: str
 
 
@@ -184,6 +191,7 @@ class PushCheckpointResponse(BaseModel):
 class PullStateResponse(BaseModel):
     manifest: SuperprojectManifest
     latest_checkpoint: ThreadCheckpoint | None = None
+    shared_checkpoint: ThreadCheckpoint | None = None
     thread_checkpoints: list[ThreadCheckpoint] = Field(default_factory=list)
     pending_resolutions: list[MismatchResolution] = Field(default_factory=list)
     managed_documents: list[ManagedDocument] = Field(default_factory=list)
@@ -214,6 +222,7 @@ class ClientSuperprojectState(BaseModel):
     tracked_thread_ids: list[str] = Field(default_factory=list)
     last_alignment_action: AlignmentAction = AlignmentAction.NONE
     last_aligned_revision: int = 0
+    last_shared_bundle_revision: int = 0
     last_local_snapshot_hash: str | None = None
     pending_thread_refreshes: dict[str, int] = Field(default_factory=dict)
     managed_file_ids: dict[str, str] = Field(default_factory=dict)

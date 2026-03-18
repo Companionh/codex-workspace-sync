@@ -206,6 +206,11 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         checkpoint = client.override_current_state(slug, thread_id=thread_id)
         typer.echo(f"Override pushed for {checkpoint.superproject_slug} at revision {checkpoint.base_revision + 1}.")
         return
+    if command == "force-thread-updates":
+        slug = _resolve_shell_superproject(args)
+        steal = "--steal" in args
+        typer.echo(json.dumps(client.force_thread_updates(slug, steal=steal), indent=2))
+        return
     if command == "refresh-thread":
         slug = _resolve_shell_superproject(args)
         thread_id = arg_value("--thread")
@@ -357,6 +362,16 @@ def override_current_state(
     slug = _resolve_cli_superproject(superproject, superproject_option)
     checkpoint = service().override_current_state(slug, thread_id=thread)
     typer.echo(f"Override pushed for {checkpoint.superproject_slug}.")
+
+
+@app.command("force-thread-updates")
+def force_thread_updates(
+    superproject: str | None = typer.Argument(None),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+    steal: bool = typer.Option(False, "--steal"),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps(service().force_thread_updates(slug, steal=steal), indent=2))
 
 
 @app.command("turn-on-sync")

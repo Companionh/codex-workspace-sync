@@ -12,6 +12,7 @@ from cws.models import (
     CreateSuperprojectRequest,
     ManagedDocument,
     PushCheckpointRequest,
+    RawCodexSharedBundle,
     RawFileArtifact,
     RawSessionBundle,
     RegisterDeviceRequest,
@@ -213,10 +214,8 @@ def test_pull_state_returns_latest_checkpoint_per_thread(tmp_path: Path) -> None
                 summary="default",
                 manifest=manifest.model_copy(update={"managed_files": [doc.record for doc in documents]}),
                 managed_documents=documents,
-                raw_bundle=RawSessionBundle(
+                shared_bundle=RawCodexSharedBundle(
                     captured_at=utc_now(),
-                    thread_id=None,
-                    session_ids=[],
                     files=[
                         RawFileArtifact(
                             relative_path="session_index.jsonl",
@@ -235,6 +234,8 @@ def test_pull_state_returns_latest_checkpoint_per_thread(tmp_path: Path) -> None
 
     assert state.latest_checkpoint is not None
     assert state.latest_checkpoint.thread_id is None
+    assert state.shared_checkpoint is not None
+    assert state.shared_checkpoint.thread_id is None
     assert returned_thread_ids == {None, "thread-a"}
 
 

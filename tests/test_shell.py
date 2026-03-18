@@ -15,7 +15,11 @@ class _RecordingService:
 
     def update_from_server(self, slug: str):
         self.calls.append(("update_from_server", (slug,)))
-        return type("Diff", (), {"__dict__": {"new_on_server": [], "new_local": [], "changed": []}})()
+        return type(
+            "Diff",
+            (),
+            {"__dict__": {"new_on_server": [], "new_local": [], "changed": [], "thread_updates": []}},
+        )()
 
     def turn_on_sync(self, slug: str, *, steal: bool = False):
         self.calls.append(("turn_on_sync", (slug, steal)))
@@ -32,6 +36,10 @@ class _RecordingService:
     def add_thread(self, slug: str, thread_ref: str):
         self.calls.append(("add_thread", (slug, thread_ref)))
         return type("Thread", (), {"model_dump": lambda self, mode="json": {"thread_id": "thread-a"}})()
+
+    def force_thread_updates(self, slug: str, *, steal: bool = False):
+        self.calls.append(("force_thread_updates", (slug, steal)))
+        return [{"thread_id": "thread-a", "revision": 7}]
 
 
 def test_shell_reports_command_errors_and_keeps_running(monkeypatch, capsys) -> None:
@@ -96,3 +104,13 @@ def test_run_shell_command_adds_thread_by_name(capsys) -> None:
     captured = capsys.readouterr()
     assert service.calls == [("add_thread", ("telegram-bots-suite", "Clone Companionh repos"))]
     assert '"thread_id": "thread-a"' in captured.out
+
+
+def test_run_shell_command_force_pushes_tracked_threads(capsys) -> None:
+    service = _RecordingService()
+
+    run_shell_command(service, "force-thread-updates", ["telegram-bots-suite", "--steal"])
+
+    captured = capsys.readouterr()
+    assert service.calls == [("force_thread_updates", ("telegram-bots-suite", True))]
+    assert '"revision": 7' in captured.out

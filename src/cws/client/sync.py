@@ -6,7 +6,7 @@ import shlex
 import shutil
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +17,7 @@ import paramiko
 from cws.client.api import ApiClient
 from cws.client.codex import (
     build_managed_documents,
+    build_shared_codex_bundle,
     build_raw_session_bundle,
     extract_turn_hashes,
     list_local_threads,
@@ -32,6 +33,7 @@ from cws.models import (
     MismatchResolution,
     OutboundQueueItem,
     PushCheckpointRequest,
+    RawCodexSharedBundle,
     SubprojectRecord,
     ThreadSummary,
     ThreadCheckpoint,
@@ -44,6 +46,7 @@ class DiffSummary:
     new_on_server: list[str]
     new_local: list[str]
     changed: list[str]
+    thread_updates: list[str] = field(default_factory=list)
 
     @property
     def has_mismatch(self) -> bool:
@@ -57,6 +60,7 @@ class PreparedCheckpointInputs:
     base_revision: int
     workspace_roots: list[Path]
     documents: list[ManagedDocument]
+    shared_bundle: RawCodexSharedBundle
 
 
 class TransientHeartbeatError(RuntimeError):
@@ -137,6 +141,14 @@ class SyncWorker(threading.Thread):
                         )
                         if not self._heartbeat(api):
                             return
+                        try:
+                            self.service._record_thread_revision(
+                                self.superproject_slug,
+                                checkpoint,
+                                response.revision,
+                            )
+                        except Exception:
+                            pass
                         self.last_pushed_hashes[key] = checkpoint.snapshot_hash
                         self.service.report_progress(
                             f"Server updated for '{self.superproject_slug}' at revision {response.revision} for thread(s): {thread_labels}."
@@ -414,6 +426,43 @@ class ClientService:
     def _thread_lookup(self) -> dict[str, ThreadSummary]:
         return {thread.thread_id: thread for thread in self.local_threads()}
 
+    @staticmethod
+    def _dedupe_thread_ids(thread_ids: list[str]) -> list[str]:
+        return list(dict.fromkeys(thread_id for thread_id in thread_ids if thread_id))
+
+    def _record_thread_revision(
+        self,
+        slug: str,
+        checkpoint: ThreadCheckpoint,
+        revision: int,
+    ) -> None:
+        local_state = self._get_superproject_state(slug)
+        if checkpoint.thread_id is None:
+            local_state.last_shared_bundle_revision = max(local_state.last_shared_bundle_revision, revision)
+        thread_ids = self._dedupe_thread_ids(self._checkpoint_session_ids(checkpoint))
+        if checkpoint.thread_id and checkpoint.thread_id not in thread_ids:
+            thread_ids.append(checkpoint.thread_id)
+        for thread_id in thread_ids:
+            current_revision = local_state.pending_thread_refreshes.get(thread_id, 0)
+            local_state.pending_thread_refreshes[thread_id] = max(current_revision, revision)
+        config = self.config()
+        config.superprojects[slug] = local_state
+        self.save_config(config)
+
+    def _checkpoint_needs_local_refresh(
+        self,
+        local_state: ClientSuperprojectState,
+        checkpoint: ThreadCheckpoint,
+    ) -> bool:
+        if checkpoint.thread_id is None:
+            return checkpoint.revision > local_state.last_shared_bundle_revision
+        thread_ids = self._dedupe_thread_ids(self._checkpoint_session_ids(checkpoint))
+        if checkpoint.thread_id and checkpoint.thread_id not in thread_ids:
+            thread_ids.append(checkpoint.thread_id)
+        if not thread_ids:
+            return True
+        return any(checkpoint.revision > local_state.pending_thread_refreshes.get(thread_id, 0) for thread_id in thread_ids)
+
     def _match_local_thread(self, thread_ref: str) -> ThreadSummary:
         normalized = thread_ref.strip()
         if not normalized:
@@ -535,23 +584,32 @@ class ClientService:
             target_path.write_bytes(decode_b64(content_b64))
 
     @staticmethod
-    def _is_volatile_raw_artifact(relative_path: str) -> bool:
+    def _is_volatile_runtime_artifact(relative_path: str) -> bool:
         return (
-            relative_path == "session_index.jsonl"
-            or relative_path.startswith("state_")
+            relative_path.startswith("state_")
             or relative_path.startswith("logs_")
             or relative_path.endswith((".sqlite", ".sqlite-shm", ".sqlite-wal"))
         )
 
     @classmethod
-    def _stable_raw_snapshot_entries(cls, raw_bundle) -> list[dict[str, str]]:
+    def _stable_thread_snapshot_entries(cls, raw_bundle) -> list[dict[str, str]]:
         return [
             {
                 "relative_path": artifact.relative_path,
                 "sha256": artifact.sha256,
             }
             for artifact in raw_bundle.files
-            if not cls._is_volatile_raw_artifact(artifact.relative_path)
+        ]
+
+    @classmethod
+    def _stable_shared_snapshot_entries(cls, shared_bundle: RawCodexSharedBundle) -> list[dict[str, str]]:
+        return [
+            {
+                "relative_path": artifact.relative_path,
+                "sha256": artifact.sha256,
+            }
+            for artifact in shared_bundle.files
+            if not cls._is_volatile_runtime_artifact(artifact.relative_path)
         ]
 
     @staticmethod
@@ -562,6 +620,23 @@ class ClientService:
         for checkpoint in getattr(server_state, "thread_checkpoints", []) or []:
             checkpoints_by_id[checkpoint.checkpoint_id] = checkpoint
         return sorted(checkpoints_by_id.values(), key=lambda checkpoint: checkpoint.revision)
+
+    def _newer_thread_checkpoints(
+        self,
+        local_state: ClientSuperprojectState,
+        server_state: Any,
+    ) -> list[ThreadCheckpoint]:
+        session_checkpoints = self._session_checkpoints_from_state(server_state)
+        checkpoints_with_raw_bundles = [
+            checkpoint
+            for checkpoint in session_checkpoints
+            if checkpoint.raw_bundle is not None and checkpoint.raw_bundle.files
+        ]
+        return [
+            checkpoint
+            for checkpoint in checkpoints_with_raw_bundles
+            if self._checkpoint_needs_local_refresh(local_state, checkpoint)
+        ]
 
     @staticmethod
     def _checkpoint_session_ids(checkpoint: ThreadCheckpoint) -> list[str]:
@@ -661,7 +736,7 @@ class ClientService:
     ) -> str:
         typer_message = (
             f"Server has updates for '{slug}': "
-            f"{len(thread_summaries)} thread(s), "
+            f"{len(diff.thread_updates)} thread(s), "
             f"{len(diff.new_on_server)} new server doc(s), "
             f"{len(diff.new_local)} local-only doc(s), "
             f"{len(diff.changed)} changed doc(s). "
@@ -736,12 +811,16 @@ class ClientService:
                 if server_by_path[path].sha256 != local_by_path[path].sha256
             ),
         )
-        session_checkpoints = self._session_checkpoints_from_state(server_state)
-        checkpoints_with_raw_bundles = [
-            checkpoint
-            for checkpoint in session_checkpoints
-            if checkpoint.raw_bundle is not None and checkpoint.raw_bundle.files
-        ]
+        checkpoints_with_raw_bundles = self._newer_thread_checkpoints(local_state, server_state)
+        diff.thread_updates = self._dedupe_thread_ids(
+            [checkpoint.thread_id for checkpoint in checkpoints_with_raw_bundles if checkpoint.thread_id]
+        )
+        shared_checkpoint = getattr(server_state, "shared_checkpoint", None)
+        apply_shared_checkpoint = (
+            shared_checkpoint is not None
+            and shared_checkpoint.shared_bundle is not None
+            and self._checkpoint_needs_local_refresh(local_state, shared_checkpoint)
+        )
         selected_checkpoints = self._select_server_thread_checkpoints(
             slug,
             checkpoints_with_raw_bundles,
@@ -766,6 +845,11 @@ class ClientService:
             atomic_write_text(target, document.content)
         self.report_progress(f"Syncing shared skills for '{slug}'...")
         self._write_shared_skills(server_state.shared_skills)
+        if apply_shared_checkpoint:
+            self.report_progress(f"Applying the shared Codex runtime bundle for '{slug}'...")
+            self._apply_shared_bundle(shared_checkpoint.shared_bundle)
+            self._record_thread_revision(slug, shared_checkpoint, shared_checkpoint.revision)
+            local_state = self._get_superproject_state(slug)
         if selected_checkpoints:
             if len(selected_checkpoints) == 1:
                 self.report_progress(f"Applying the latest Codex session bundle for '{slug}'...")
@@ -778,17 +862,13 @@ class ClientService:
                 self._apply_raw_bundle(checkpoint.raw_bundle)
                 session_ids = self._checkpoint_session_ids(checkpoint)
                 refreshed_session_ids.extend(session_ids)
-                for session_id in session_ids:
-                    current_revision = local_state.pending_thread_refreshes.get(session_id, 0)
-                    local_state.pending_thread_refreshes[session_id] = max(
-                        current_revision,
-                        checkpoint.revision,
-                    )
+                self._record_thread_revision(slug, checkpoint, checkpoint.revision)
             thread_labels = self._format_thread_labels(refreshed_session_ids)
             if refreshed_session_ids:
                 self.report_progress(f"Updated Codex thread(s) for '{slug}': {thread_labels}.")
             else:
                 self.report_progress(f"Updated {thread_labels} for '{slug}'.")
+            local_state = self._get_superproject_state(slug)
         local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
         local_state.last_aligned_revision = server_state.manifest.revision
         server_file_ids = {
@@ -811,8 +891,8 @@ class ClientService:
             or relative_path.endswith((".sqlite", ".sqlite-shm", ".sqlite-wal"))
         )
 
-    def _apply_raw_bundle(self, bundle) -> None:
-        for artifact in bundle.files:
+    def _apply_bundle_artifacts(self, artifacts) -> None:
+        for artifact in artifacts:
             target = self.codex_root / artifact.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -821,6 +901,12 @@ class ClientService:
                 if self._can_skip_locked_raw_artifact(artifact.relative_path):
                     continue
                 raise
+
+    def _apply_raw_bundle(self, bundle) -> None:
+        self._apply_bundle_artifacts(bundle.files)
+
+    def _apply_shared_bundle(self, bundle: RawCodexSharedBundle) -> None:
+        self._apply_bundle_artifacts(bundle.files)
 
     def prepare_live_checkpoint_inputs(
         self,
@@ -848,12 +934,14 @@ class ClientService:
             }
         )
         workspace_roots = [Path(path) for path in local_state.workspace_roots if Path(path).exists()]
+        shared_bundle = build_shared_codex_bundle(self.codex_root)
         return PreparedCheckpointInputs(
             local_state=local_state,
             incoming_manifest=incoming_manifest,
             base_revision=manifest.revision,
             workspace_roots=workspace_roots,
             documents=documents,
+            shared_bundle=shared_bundle,
         )
 
     def _build_checkpoint_from_inputs(
@@ -866,6 +954,7 @@ class ClientService:
         thread_id: str | None = None,
     ) -> ThreadCheckpoint:
         raw_bundle = None
+        shared_bundle = None
         turn_hashes: list[str] = []
         if thread_id is not None:
             if show_progress:
@@ -877,25 +966,36 @@ class ClientService:
                 if artifact.relative_path.startswith("sessions/")
             ]
             turn_hashes = extract_turn_hashes([path for path in session_files if path.exists()])
+        else:
+            shared_bundle = prepared.shared_bundle
         if show_progress:
             self.report_progress(f"Computing the checkpoint summary for '{slug}'...")
         snapshot_hash = sha256_text(
             json.dumps(
                 {
-                    "documents": [document.record.model_dump(mode="json") for document in prepared.documents],
-                    "raw_files": self._stable_raw_snapshot_entries(raw_bundle) if raw_bundle else [],
+                    "documents": (
+                        [document.record.model_dump(mode="json") for document in prepared.documents]
+                        if thread_id is None
+                        else []
+                    ),
+                    "raw_files": self._stable_thread_snapshot_entries(raw_bundle) if raw_bundle else [],
+                    "shared_files": self._stable_shared_snapshot_entries(shared_bundle) if shared_bundle else [],
                     "turn_hashes": turn_hashes,
                     "thread_id": thread_id,
                 },
                 sort_keys=True,
             )
         )
-        summary = (
-            f"Synced {len(prepared.documents)} managed Markdown files and {len(raw_bundle.files)} Codex artifacts for "
-            f"{raw_bundle.thread_name or thread_id}."
-            if raw_bundle is not None
-            else f"Synced {len(prepared.documents)} managed Markdown files."
-        )
+        if raw_bundle is not None:
+            summary = (
+                f"Synced {len(raw_bundle.files)} thread Codex artifacts for "
+                f"{raw_bundle.thread_name or thread_id}."
+            )
+        else:
+            summary = (
+                f"Synced {len(prepared.documents)} managed Markdown files and "
+                f"{len(shared_bundle.files) if shared_bundle else 0} shared Codex artifacts."
+            )
         return ThreadCheckpoint(
             superproject_slug=slug,
             thread_id=thread_id or (raw_bundle.thread_id if raw_bundle else None),
@@ -907,8 +1007,9 @@ class ClientService:
             turn_hashes=turn_hashes,
             summary=summary,
             manifest=prepared.incoming_manifest,
-            managed_documents=prepared.documents,
+            managed_documents=prepared.documents if thread_id is None else [],
             raw_bundle=raw_bundle,
+            shared_bundle=shared_bundle,
             snapshot_hash=snapshot_hash,
         )
 
@@ -938,26 +1039,28 @@ class ClientService:
         prepared: PreparedCheckpointInputs | None = None,
     ) -> list[ThreadCheckpoint]:
         prepared_inputs = prepared or self.prepare_live_checkpoint_inputs(slug, show_progress=show_progress)
+        shared_checkpoint = self._build_checkpoint_from_inputs(
+            slug,
+            prepared=prepared_inputs,
+            canonical=canonical,
+            show_progress=show_progress,
+            thread_id=None,
+        )
         tracked_thread_ids = self._tracked_thread_ids(slug)
         if not tracked_thread_ids:
-            return [
+            return [shared_checkpoint]
+        return [
+            shared_checkpoint,
+            *[
                 self._build_checkpoint_from_inputs(
                     slug,
                     prepared=prepared_inputs,
                     canonical=canonical,
                     show_progress=show_progress,
-                    thread_id=None,
+                    thread_id=thread_id,
                 )
-            ]
-        return [
-            self._build_checkpoint_from_inputs(
-                slug,
-                prepared=prepared_inputs,
-                canonical=canonical,
-                show_progress=show_progress,
-                thread_id=thread_id,
-            )
-            for thread_id in tracked_thread_ids
+                for thread_id in tracked_thread_ids
+            ],
         ]
 
     def enqueue_checkpoint(self, checkpoint: ThreadCheckpoint) -> None:
@@ -988,10 +1091,18 @@ class ClientService:
                 self.state_store.save_queue(remaining)
                 return False
             try:
-                client.push_checkpoint(
+                response = client.push_checkpoint(
                     item.superproject_slug,
                     PushCheckpointRequest(checkpoint=item.checkpoint),
                 )
+                try:
+                    self._record_thread_revision(
+                        item.superproject_slug,
+                        item.checkpoint,
+                        response.revision,
+                    )
+                except Exception:
+                    pass
             except Exception:
                 remaining.append(item)
             if heartbeat is not None and not heartbeat(client):
@@ -1000,6 +1111,57 @@ class ClientService:
                 return False
         self.state_store.save_queue(remaining)
         return True
+
+    def force_thread_updates(self, slug: str, *, steal: bool = False) -> list[dict[str, Any]]:
+        config = self.config()
+        if config.sync_active_superproject:
+            raise RuntimeError("turn-off-sync before force-thread-updates.")
+        tracked_thread_ids = self._tracked_thread_ids(slug)
+        if not tracked_thread_ids:
+            raise RuntimeError(f"No tracked threads are configured for '{slug}'.")
+
+        api = self.api_client()
+        self.report_progress(f"Acquiring the global live-sync lease for a forced thread push to '{slug}'...")
+        lease = api.acquire_lease(steal=steal)
+        if not lease.granted:
+            raise RuntimeError(
+                f"Another device currently holds the active lease: {lease.conflict_device_id}"
+            )
+
+        pushed: list[dict[str, Any]] = []
+        try:
+            prepared = self.prepare_live_checkpoint_inputs(slug, show_progress=False)
+            checkpoints = self.build_live_checkpoints(
+                slug,
+                canonical=True,
+                show_progress=False,
+                prepared=prepared,
+            )
+            for checkpoint in checkpoints:
+                if checkpoint.thread_id is None:
+                    continue
+                thread_labels = self._format_thread_labels(
+                    self._checkpoint_session_ids(checkpoint),
+                    checkpoint,
+                )
+                self.report_progress(f"Force-pushing tracked thread(s) for '{slug}': {thread_labels}.")
+                response = api.push_checkpoint(
+                    slug,
+                    PushCheckpointRequest(checkpoint=checkpoint),
+                )
+                self._record_thread_revision(slug, checkpoint, response.revision)
+                pushed.append(
+                    {
+                        "thread_id": checkpoint.thread_id,
+                        "thread_name": (
+                            checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else checkpoint.thread_id
+                        ),
+                        "revision": response.revision,
+                    }
+                )
+        finally:
+            api.release_lease()
+        return pushed
 
     def override_current_state(
         self,
@@ -1014,13 +1176,16 @@ class ClientService:
         if not assume_yes:
             if input("Override server state with this machine's version? [y/N]: ").strip().lower() not in {"y", "yes"}:
                 raise RuntimeError("Override aborted by user.")
-        checkpoint = self.build_checkpoint(slug, canonical=True)
-        if thread_id:
-            checkpoint = checkpoint.model_copy(update={"thread_id": thread_id})
+        checkpoint = self.build_checkpoint(slug, canonical=True, thread_id=thread_id)
         self.api_client().override_state(slug, PushCheckpointRequest(checkpoint=checkpoint, override=True))
         local_state = self._get_superproject_state(slug)
         local_state.last_alignment_action = AlignmentAction.OVERRIDE_CURRENT_STATE
-        local_state.last_aligned_revision = checkpoint.base_revision + 1
+        if checkpoint.thread_id is None:
+            local_state.last_shared_bundle_revision = max(
+                local_state.last_shared_bundle_revision,
+                checkpoint.base_revision + 1,
+            )
+            local_state.last_aligned_revision = checkpoint.base_revision + 1
         config.superprojects[slug] = local_state
         self.save_config(config)
         return checkpoint
@@ -1067,11 +1232,7 @@ class ClientService:
         if checkpoint.raw_bundle is None:
             raise RuntimeError("Requested thread does not have a raw session bundle on the server.")
         self._apply_raw_bundle(checkpoint.raw_bundle)
-        local_state = self._get_superproject_state(slug)
-        local_state.pending_thread_refreshes[thread_id] = checkpoint.revision
-        config = self.config()
-        config.superprojects[slug] = local_state
-        self.save_config(config)
+        self._record_thread_revision(slug, checkpoint, checkpoint.revision)
 
     def disconnect_superproject(self, slug: str, *, wipe_managed_root: bool = True) -> dict[str, Any]:
         config = self.config()
