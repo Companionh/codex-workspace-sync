@@ -17,11 +17,16 @@ from cws.models import (
     PullStateResponse,
     PushCheckpointRequest,
     PushCheckpointResponse,
+    RenameThreadRequest,
+    RenameThreadResponse,
     RenameSuperprojectRequest,
     RenameSuperprojectResponse,
     ResolveMismatchRequest,
     SuperprojectManifest,
     ThreadSummary,
+    UpdateMetadataResponse,
+    UpdatePackageRequest,
+    UpdatePackageResponse,
 )
 from cws.server.service import ServerService
 
@@ -117,6 +122,21 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/superprojects/{slug}/threads/{thread_id}/rename", response_model=RenameThreadResponse)
+    def rename_thread(
+        slug: str,
+        thread_id: str,
+        request: RenameThreadRequest,
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> RenameThreadResponse:
+        try:
+            return service.rename_thread(slug, thread_id, request.name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/superprojects/{slug}/state", response_model=PullStateResponse)
     def pull_state(
         slug: str,
@@ -125,6 +145,29 @@ def create_app() -> FastAPI:
     ) -> PullStateResponse:
         try:
             return service.pull_state(slug)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/superprojects/{slug}/update-metadata", response_model=UpdateMetadataResponse)
+    def update_metadata(
+        slug: str,
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> UpdateMetadataResponse:
+        try:
+            return service.update_metadata(slug)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/superprojects/{slug}/update-package", response_model=UpdatePackageResponse)
+    def update_package(
+        slug: str,
+        request: UpdatePackageRequest,
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> UpdatePackageResponse:
+        try:
+            return service.update_package(slug, request)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

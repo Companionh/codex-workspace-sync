@@ -31,10 +31,15 @@ from cws.models import (
     RawFileArtifact,
     RegisterDeviceRequest,
     RegisterDeviceResponse,
+    RenameThreadResponse,
     RenameSuperprojectResponse,
+    SharedCheckpointMetadata,
     SuperprojectManifest,
     ThreadSummary,
     ThreadCheckpoint,
+    UpdateMetadataResponse,
+    UpdatePackageRequest,
+    UpdatePackageResponse,
 )
 from cws.server.db import ServerDatabase
 from cws.server.security import hash_secret, verify_secret
@@ -355,6 +360,49 @@ class ServerService:
         self._save_manifest(updated_manifest)
         return RenameSuperprojectResponse(manifest=updated_manifest)
 
+    def _thread_name_overrides(self, slug: str) -> dict[str, dict[str, Any]]:
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT thread_id, custom_name, updated_at
+                FROM thread_names
+                WHERE superproject_slug = ?
+                ORDER BY updated_at DESC
+                """,
+                (slug,),
+            ).fetchall()
+        return {
+            row["thread_id"]: {
+                "name": row["custom_name"],
+                "updated_at": datetime.fromisoformat(row["updated_at"]),
+            }
+            for row in rows
+        }
+
+    def rename_thread(self, slug: str, thread_id: str, new_name: str) -> RenameThreadResponse:
+        self.get_manifest(slug)
+        cleaned_name = new_name.strip()
+        if not cleaned_name:
+            raise ValueError("Thread name cannot be empty.")
+        normalized_thread_id = thread_id.strip()
+        if not normalized_thread_id:
+            raise ValueError("Thread ID cannot be empty.")
+        updated_at = utc_now()
+        with self.db.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO thread_names (superproject_slug, thread_id, custom_name, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(superproject_slug, thread_id) DO UPDATE SET
+                    custom_name = excluded.custom_name,
+                    updated_at = excluded.updated_at
+                """,
+                (slug, normalized_thread_id, cleaned_name, updated_at.isoformat()),
+            )
+            connection.commit()
+        thread = self._thread_summary(slug, normalized_thread_id, updated_at=updated_at)
+        return RenameThreadResponse(thread=thread)
+
     def get_manifest(self, slug: str) -> SuperprojectManifest:
         with self.db.connect() as connection:
             row = connection.execute(
@@ -443,6 +491,13 @@ class ServerService:
             checkpoints.append(checkpoint)
         return sorted(checkpoints, key=lambda checkpoint: checkpoint.revision)
 
+    def _latest_thread_checkpoint_map(self, slug: str) -> dict[str, ThreadCheckpoint]:
+        return {
+            checkpoint.thread_id: checkpoint
+            for checkpoint in self._latest_thread_checkpoints(slug)
+            if checkpoint.thread_id
+        }
+
     def _pending_resolutions(self, slug: str) -> list[MismatchResolution]:
         with self.db.connect() as connection:
             rows = connection.execute(
@@ -490,6 +545,49 @@ class ServerService:
                 if (self._superproject_root(slug) / record.relative_path).exists()
             ],
             shared_skills=self._shared_skills(),
+        )
+
+    def update_metadata(self, slug: str) -> UpdateMetadataResponse:
+        manifest = self.get_manifest(slug)
+        shared_checkpoint = self._latest_shared_checkpoint(slug)
+        return UpdateMetadataResponse(
+            manifest=manifest,
+            shared_checkpoint=(
+                SharedCheckpointMetadata(
+                    revision=shared_checkpoint.revision,
+                    updated_at=shared_checkpoint.created_at,
+                )
+                if shared_checkpoint is not None
+                else None
+            ),
+            threads=self.list_threads(slug),
+            pending_resolutions=self._pending_resolutions(slug),
+        )
+
+    def update_package(self, slug: str, request: UpdatePackageRequest) -> UpdatePackageResponse:
+        manifest = self.get_manifest(slug)
+        checkpoint_map = self._latest_thread_checkpoint_map(slug)
+        thread_ids = list(dict.fromkeys(thread_id for thread_id in request.thread_ids if thread_id))
+        thread_checkpoints = [
+            checkpoint_map[thread_id]
+            for thread_id in thread_ids
+            if thread_id in checkpoint_map
+        ]
+        return UpdatePackageResponse(
+            manifest=manifest,
+            shared_checkpoint=self._latest_shared_checkpoint(slug) if request.include_shared_checkpoint else None,
+            thread_checkpoints=thread_checkpoints,
+            managed_documents=[
+                ManagedDocument(
+                    record=record,
+                    content=(self._superproject_root(slug) / record.relative_path).read_text(encoding="utf-8"),
+                )
+                for record in manifest.managed_files
+                if request.include_managed_documents
+                and (self._superproject_root(slug) / record.relative_path).exists()
+            ],
+            shared_skills=self._shared_skills() if request.include_shared_skills else [],
+            pending_resolutions=self._pending_resolutions(slug),
         )
 
     @staticmethod
@@ -598,35 +696,74 @@ class ServerService:
             return None
         return "\n".join(lines[:2])
 
+    def _thread_summary(
+        self,
+        slug: str,
+        thread_id: str,
+        *,
+        checkpoint: ThreadCheckpoint | None = None,
+        overrides: dict[str, dict[str, Any]] | None = None,
+        updated_at: datetime | None = None,
+    ) -> ThreadSummary:
+        effective_overrides = overrides if overrides is not None else self._thread_name_overrides(slug)
+        checkpoint_value = checkpoint or self._latest_checkpoint(slug, thread_id)
+        override = effective_overrides.get(thread_id)
+        derived_name = (
+            self._thread_name_from_raw_bundle(checkpoint_value)
+            if checkpoint_value is not None
+            else None
+        )
+        derived_preview = (
+            self._preview_from_raw_bundle(checkpoint_value)
+            if checkpoint_value is not None
+            else None
+        )
+        override_updated_at = override["updated_at"] if override else None
+        return ThreadSummary(
+            thread_id=thread_id,
+            thread_name=(
+                (override["name"] if override else None)
+                or derived_name
+                or (checkpoint_value.raw_bundle.thread_name if checkpoint_value and checkpoint_value.raw_bundle else None)
+                or derived_preview
+                or (checkpoint_value.summary if checkpoint_value else None)
+                or thread_id
+            ),
+            updated_at=(
+                (checkpoint_value.raw_bundle.thread_updated_at if checkpoint_value and checkpoint_value.raw_bundle else None)
+                or (checkpoint_value.created_at if checkpoint_value is not None else None)
+                or updated_at
+                or override_updated_at
+                or utc_now()
+            ),
+            last_user_turn_preview=(
+                (checkpoint_value.raw_bundle.last_user_turn_preview if checkpoint_value and checkpoint_value.raw_bundle else None)
+                or derived_preview
+            ),
+            revision=checkpoint_value.revision if checkpoint_value is not None else None,
+            name_manually_set=override is not None,
+            tracked=checkpoint_value is not None or override is not None,
+            source="server",
+        )
+
     def list_threads(self, slug: str) -> list[ThreadSummary]:
-        summaries: list[ThreadSummary] = []
-        for checkpoint in self._latest_thread_checkpoints(slug):
-            if not checkpoint.thread_id:
-                continue
-            derived_name = self._thread_name_from_raw_bundle(checkpoint)
-            derived_preview = self._preview_from_raw_bundle(checkpoint)
-            summaries.append(
-                ThreadSummary(
-                    thread_id=checkpoint.thread_id,
-                    thread_name=(
-                        derived_name
-                        or (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
-                        or derived_preview
-                        or checkpoint.summary
-                        or checkpoint.thread_id
-                    ),
-                    updated_at=(
-                        (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
-                        or checkpoint.created_at
-                    ),
-                    last_user_turn_preview=(
-                        (checkpoint.raw_bundle.last_user_turn_preview if checkpoint.raw_bundle else None)
-                        or derived_preview
-                    ),
-                    tracked=True,
-                    source="server",
-                )
+        checkpoint_map = self._latest_thread_checkpoint_map(slug)
+        overrides = self._thread_name_overrides(slug)
+        thread_ids = list(
+            dict.fromkeys(
+                [thread_id for thread_id in checkpoint_map if thread_id]
+                + list(overrides.keys())
             )
+        )
+        summaries = [
+            self._thread_summary(
+                slug,
+                thread_id,
+                checkpoint=checkpoint_map.get(thread_id),
+                overrides=overrides,
+            )
+            for thread_id in thread_ids
+        ]
         return sorted(summaries, key=lambda item: (item.updated_at, item.thread_name, item.thread_id), reverse=True)
 
     def delete_superproject(self, slug: str, *, requesting_device_id: str, force: bool = False) -> dict[str, object]:
@@ -643,6 +780,7 @@ class ServerService:
             connection.execute("DELETE FROM checkpoints WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM mismatch_resolutions WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM backups WHERE superproject_slug = ?", (slug,))
+            connection.execute("DELETE FROM thread_names WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM superprojects WHERE slug = ?", (slug,))
             connection.commit()
 

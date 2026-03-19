@@ -54,6 +54,14 @@ class ServerDatabase:
                     manifest_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS thread_names (
+                    superproject_slug TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    custom_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (superproject_slug, thread_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     checkpoint_id TEXT PRIMARY KEY,
                     superproject_slug TEXT NOT NULL,
@@ -88,6 +96,9 @@ class ServerDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_checkpoints_superproject_thread_revision
                     ON checkpoints (superproject_slug, thread_id, revision DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_thread_names_superproject_updated
+                    ON thread_names (superproject_slug, updated_at DESC);
 
                 CREATE INDEX IF NOT EXISTS idx_backups_superproject_created
                     ON backups (superproject_slug, created_at DESC);

@@ -104,6 +104,8 @@ class ThreadSummary(BaseModel):
     thread_name: str
     updated_at: datetime
     last_user_turn_preview: str | None = None
+    revision: int | None = None
+    name_manually_set: bool = False
     tracked: bool = False
     source: Literal["local", "server"] = "local"
 
@@ -185,6 +187,14 @@ class RenameSuperprojectResponse(BaseModel):
     manifest: SuperprojectManifest
 
 
+class RenameThreadRequest(BaseModel):
+    name: str
+
+
+class RenameThreadResponse(BaseModel):
+    thread: ThreadSummary
+
+
 class PushCheckpointRequest(BaseModel):
     checkpoint: ThreadCheckpoint
     override: bool = False
@@ -194,6 +204,34 @@ class PushCheckpointResponse(BaseModel):
     accepted: bool
     revision: int
     backup_id: str | None = None
+
+
+class SharedCheckpointMetadata(BaseModel):
+    revision: int
+    updated_at: datetime
+
+
+class UpdateMetadataResponse(BaseModel):
+    manifest: SuperprojectManifest
+    shared_checkpoint: SharedCheckpointMetadata | None = None
+    threads: list[ThreadSummary] = Field(default_factory=list)
+    pending_resolutions: list[MismatchResolution] = Field(default_factory=list)
+
+
+class UpdatePackageRequest(BaseModel):
+    thread_ids: list[str] = Field(default_factory=list)
+    include_shared_checkpoint: bool = False
+    include_managed_documents: bool = True
+    include_shared_skills: bool = True
+
+
+class UpdatePackageResponse(BaseModel):
+    manifest: SuperprojectManifest
+    shared_checkpoint: ThreadCheckpoint | None = None
+    thread_checkpoints: list[ThreadCheckpoint] = Field(default_factory=list)
+    managed_documents: list[ManagedDocument] = Field(default_factory=list)
+    shared_skills: list[RawFileArtifact] = Field(default_factory=list)
+    pending_resolutions: list[MismatchResolution] = Field(default_factory=list)
 
 
 class PullStateResponse(BaseModel):

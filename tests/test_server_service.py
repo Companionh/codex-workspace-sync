@@ -551,3 +551,64 @@ def test_list_threads_backfills_name_and_preview_from_raw_bundle_files(tmp_path:
     assert len(threads) == 1
     assert threads[0].thread_name == "Clone Companionh repos"
     assert threads[0].last_user_turn_preview == "first line\nsecond line"
+
+
+def test_rename_thread_preserves_manual_name_across_new_checkpoints(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+
+    def push_thread_checkpoint(thread_name: str, snapshot_hash: str) -> None:
+        service.push_checkpoint(
+            device.device.device_id,
+            PushCheckpointRequest(
+                checkpoint=ThreadCheckpoint(
+                    superproject_slug="telegram-suite",
+                    thread_id="thread-a",
+                    revision=0,
+                    created_at=utc_now(),
+                    source_device_id=device.device.device_id,
+                    canonical=True,
+                    base_revision=manifest.revision,
+                    turn_hashes=["turn-a"],
+                    summary="fallback summary",
+                    manifest=manifest,
+                    managed_documents=[],
+                    raw_bundle=RawSessionBundle(
+                        captured_at=utc_now(),
+                        thread_id="thread-a",
+                        thread_name=thread_name,
+                        last_user_turn_preview="preview text",
+                        session_ids=["thread-a"],
+                        files=[],
+                    ),
+                    snapshot_hash=snapshot_hash,
+                )
+            ),
+        )
+
+    push_thread_checkpoint("Original auto name", "snapshot-thread-a-1")
+    renamed = service.rename_thread("telegram-suite", "thread-a", "My Manual Name")
+    push_thread_checkpoint("New auto name from bundle", "snapshot-thread-a-2")
+
+    threads = service.list_threads("telegram-suite")
+
+    assert renamed.thread.thread_name == "My Manual Name"
+    assert renamed.thread.name_manually_set is True
+    assert len(threads) == 1
+    assert threads[0].thread_name == "My Manual Name"
+    assert threads[0].name_manually_set is True
+    assert threads[0].last_user_turn_preview == "preview text"
+    assert threads[0].revision == 2

@@ -16,11 +16,16 @@ from cws.models import (
     PullStateResponse,
     PushCheckpointRequest,
     PushCheckpointResponse,
+    RenameThreadRequest,
+    RenameThreadResponse,
     RenameSuperprojectRequest,
     RenameSuperprojectResponse,
     SuperprojectManifest,
     ThreadSummary,
     ThreadCheckpoint,
+    UpdateMetadataResponse,
+    UpdatePackageRequest,
+    UpdatePackageResponse,
 )
 
 
@@ -83,6 +88,15 @@ class ApiClient:
         )
         return RenameSuperprojectResponse.model_validate(response.json())
 
+    def rename_thread(self, slug: str, thread_id: str, name: str) -> RenameThreadResponse:
+        payload = RenameThreadRequest(name=name)
+        response = self._request(
+            "POST",
+            f"/api/superprojects/{slug}/threads/{thread_id}/rename",
+            json=payload.model_dump(mode="json"),
+        )
+        return RenameThreadResponse.model_validate(response.json())
+
     def pull_state(self, slug: str) -> PullStateResponse:
         response = self._request("GET", f"/api/superprojects/{slug}/state")
         return PullStateResponse.model_validate(response.json())
@@ -95,6 +109,76 @@ class ApiClient:
                 raise
             return self.pull_state(slug).manifest
         return SuperprojectManifest.model_validate(response.json()["manifest"])
+
+    def get_update_metadata(self, slug: str) -> UpdateMetadataResponse:
+        try:
+            response = self._request("GET", f"/api/superprojects/{slug}/update-metadata")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            state = self.pull_state(slug)
+            threads = [
+                ThreadSummary(
+                    thread_id=checkpoint.thread_id,
+                    thread_name=(
+                        (checkpoint.raw_bundle.thread_name if checkpoint.raw_bundle else None)
+                        or checkpoint.summary
+                        or checkpoint.thread_id
+                    ),
+                    updated_at=(
+                        (checkpoint.raw_bundle.thread_updated_at if checkpoint.raw_bundle else None)
+                        or checkpoint.created_at
+                    ),
+                    last_user_turn_preview=(
+                        checkpoint.raw_bundle.last_user_turn_preview if checkpoint.raw_bundle else None
+                    ),
+                    revision=checkpoint.revision,
+                    tracked=True,
+                    source="server",
+                )
+                for checkpoint in state.thread_checkpoints
+                if checkpoint.thread_id
+            ]
+            return UpdateMetadataResponse(
+                manifest=state.manifest,
+                shared_checkpoint=(
+                    {
+                        "revision": state.shared_checkpoint.revision,
+                        "updated_at": state.shared_checkpoint.created_at,
+                    }
+                    if state.shared_checkpoint is not None
+                    else None
+                ),
+                threads=threads,
+                pending_resolutions=state.pending_resolutions,
+            )
+        return UpdateMetadataResponse.model_validate(response.json())
+
+    def fetch_update_package(self, slug: str, request: UpdatePackageRequest) -> UpdatePackageResponse:
+        try:
+            response = self._request(
+                "POST",
+                f"/api/superprojects/{slug}/update-package",
+                json=request.model_dump(mode="json"),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            state = self.pull_state(slug)
+            thread_ids = set(request.thread_ids)
+            return UpdatePackageResponse(
+                manifest=state.manifest,
+                shared_checkpoint=state.shared_checkpoint if request.include_shared_checkpoint else None,
+                thread_checkpoints=[
+                    checkpoint
+                    for checkpoint in state.thread_checkpoints
+                    if checkpoint.thread_id in thread_ids
+                ],
+                managed_documents=state.managed_documents if request.include_managed_documents else [],
+                shared_skills=state.shared_skills if request.include_shared_skills else [],
+                pending_resolutions=state.pending_resolutions,
+            )
+        return UpdatePackageResponse.model_validate(response.json())
 
     def list_threads(self, slug: str) -> list[ThreadSummary]:
         try:

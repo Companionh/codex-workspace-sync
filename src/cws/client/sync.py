@@ -37,6 +37,8 @@ from cws.models import (
     SubprojectRecord,
     ThreadSummary,
     ThreadCheckpoint,
+    UpdateMetadataResponse,
+    UpdatePackageRequest,
 )
 from cws.utils import atomic_write_bytes, atomic_write_text, decode_b64, dump_json_file, sha256_text, slugify, utc_now
 
@@ -501,6 +503,50 @@ class ClientService:
         self.save_config(config)
         return thread.model_copy(update={"tracked": True})
 
+    def _match_thread_from_summaries(
+        self,
+        thread_ref: str,
+        summaries: list[ThreadSummary],
+    ) -> ThreadSummary | None:
+        normalized = thread_ref.strip()
+        if not normalized:
+            raise RuntimeError("Thread reference cannot be empty.")
+        by_id = {thread.thread_id: thread for thread in summaries}
+        if normalized in by_id:
+            return by_id[normalized]
+        matches = [
+            thread
+            for thread in summaries
+            if thread.thread_name.casefold() == normalized.casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple threads match '{thread_ref}'. Use the thread ID instead."
+            )
+        partial_matches = [
+            thread
+            for thread in summaries
+            if normalized.casefold() in thread.thread_name.casefold()
+        ]
+        if len(partial_matches) == 1:
+            return partial_matches[0]
+        if len(partial_matches) > 1:
+            raise RuntimeError(
+                f"Multiple threads match '{thread_ref}'. Use the thread ID instead."
+            )
+        return None
+
+    def _match_thread_anywhere(self, slug: str, thread_ref: str) -> ThreadSummary:
+        local_match = self._match_thread_from_summaries(thread_ref, self.local_threads())
+        if local_match is not None:
+            return local_match
+        server_match = self._match_thread_from_summaries(thread_ref, self.threadlist(slug))
+        if server_match is not None:
+            return server_match
+        raise RuntimeError(f"No thread matched '{thread_ref}'.")
+
     @staticmethod
     def _adopt_server_name(local_state: ClientSuperprojectState, server_name: str) -> None:
         if not local_state.name or not local_state.name_manually_set:
@@ -520,6 +566,19 @@ class ClientService:
         return {
             "slug": slug,
             "name": manifest.name,
+        }
+
+    def rename_thread(self, slug: str, thread_ref: str, new_name: str) -> dict[str, Any]:
+        cleaned_name = new_name.strip()
+        if not cleaned_name:
+            raise RuntimeError("Thread name cannot be empty.")
+        thread = self._match_thread_anywhere(slug, thread_ref)
+        renamed = self.api_client().rename_thread(slug, thread.thread_id, cleaned_name).thread
+        return {
+            "slug": slug,
+            "thread_id": renamed.thread_id,
+            "name": renamed.thread_name,
+            "name_manually_set": renamed.name_manually_set,
         }
 
     def create_superproject(
@@ -567,22 +626,22 @@ class ClientService:
         workspace_roots: list[Path],
         assume_yes: bool = True,
     ) -> DiffSummary:
-        server_state = self.api_client().pull_state(slug)
+        metadata = self._load_update_metadata(self.api_client(), slug)
         config = self.config()
         local_state = config.superprojects.get(slug)
         if local_state is None:
             local_state = ClientSuperprojectState(
-                slug=server_state.manifest.slug,
-                name=server_state.manifest.name,
+                slug=metadata.manifest.slug,
+                name=metadata.manifest.name,
             )
-        local_state.slug = server_state.manifest.slug
-        self._adopt_server_name(local_state, server_state.manifest.name)
+        local_state.slug = metadata.manifest.slug
+        self._adopt_server_name(local_state, metadata.manifest.name)
         local_state.managed_root = str(managed_root)
         local_state.workspace_roots = [str(path) for path in workspace_roots]
         config.superprojects[slug] = local_state
         self.save_config(config)
         managed_root.mkdir(parents=True, exist_ok=True)
-        return self.update_from_server(server_state.manifest.slug, assume_yes=assume_yes)
+        return self.update_from_server(metadata.manifest.slug, assume_yes=assume_yes)
 
     def _get_superproject_state(self, slug: str) -> ClientSuperprojectState:
         config = self.config()
@@ -669,7 +728,8 @@ class ClientService:
             session_ids.append(checkpoint.thread_id)
         return session_ids
 
-    def _summary_from_checkpoint(self, checkpoint: ThreadCheckpoint) -> ThreadSummary:
+    @staticmethod
+    def _summary_from_checkpoint_static(checkpoint: ThreadCheckpoint) -> ThreadSummary:
         thread_id = checkpoint.thread_id
         if not thread_id:
             raise RuntimeError("Checkpoint does not refer to a named thread.")
@@ -689,16 +749,22 @@ class ClientService:
             last_user_turn_preview=(
                 checkpoint.raw_bundle.last_user_turn_preview if checkpoint.raw_bundle else None
             ),
-            tracked=thread_id in self._tracked_thread_ids(checkpoint.superproject_slug),
+            revision=checkpoint.revision,
+            tracked=False,
             source="server",
         )
+
+    def _summary_from_checkpoint(self, checkpoint: ThreadCheckpoint) -> ThreadSummary:
+        summary = self._summary_from_checkpoint_static(checkpoint)
+        summary.tracked = summary.thread_id in self._tracked_thread_ids(checkpoint.superproject_slug)
+        return summary
 
     def threadlist(self, slug: str) -> list[ThreadSummary]:
         summaries = self.api_client().list_threads(slug)
         local_lookup = self._thread_lookup()
         for summary in summaries:
             local_match = local_lookup.get(summary.thread_id)
-            if local_match and local_match.thread_name:
+            if local_match and local_match.thread_name and not summary.name_manually_set:
                 summary.thread_name = local_match.thread_name
             if local_match and not summary.last_user_turn_preview and local_match.last_user_turn_preview:
                 summary.last_user_turn_preview = local_match.last_user_turn_preview
@@ -732,13 +798,61 @@ class ClientService:
             return api_client.get_manifest(slug)
         return api_client.pull_state(slug).manifest
 
+    @classmethod
+    def _load_update_metadata(cls, api_client: Any, slug: str) -> UpdateMetadataResponse:
+        if hasattr(api_client, "get_update_metadata"):
+            return api_client.get_update_metadata(slug)
+        state = api_client.pull_state(slug)
+        session_checkpoints = cls._session_checkpoints_from_state(state)
+        threads = [
+            cls._summary_from_checkpoint_static(checkpoint)
+            for checkpoint in session_checkpoints
+            if checkpoint.thread_id
+        ]
+        return UpdateMetadataResponse(
+            manifest=state.manifest,
+            shared_checkpoint=(
+                {
+                    "revision": state.shared_checkpoint.revision,
+                    "updated_at": state.shared_checkpoint.created_at,
+                }
+                if state.shared_checkpoint is not None
+                else None
+            ),
+            threads=threads,
+            pending_resolutions=state.pending_resolutions,
+        )
+
+    @staticmethod
+    def _fetch_update_package(api_client: Any, slug: str, request: UpdatePackageRequest):
+        if hasattr(api_client, "fetch_update_package"):
+            return api_client.fetch_update_package(slug, request)
+        state = api_client.pull_state(slug)
+        selected_ids = set(request.thread_ids)
+        return type(
+            "LegacyUpdatePackage",
+            (),
+            {
+                "manifest": state.manifest,
+                "shared_checkpoint": state.shared_checkpoint if request.include_shared_checkpoint else None,
+                "thread_checkpoints": [
+                    checkpoint
+                    for checkpoint in getattr(state, "thread_checkpoints", []) or []
+                    if checkpoint.thread_id in selected_ids
+                ],
+                "managed_documents": state.managed_documents if request.include_managed_documents else [],
+                "shared_skills": state.shared_skills if request.include_shared_skills else [],
+                "pending_resolutions": state.pending_resolutions,
+            },
+        )()
+
     def compare_with_server(self, slug: str) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
         managed_root = Path(local_state.managed_root)
         local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
-        manifest = self._load_manifest(self.api_client(), slug)
+        manifest = self._load_update_metadata(self.api_client(), slug).manifest
         server_by_path = {record.relative_path: record for record in manifest.managed_files}
         local_by_path = {document.record.relative_path: document.record for document in local_documents}
         new_on_server = sorted(set(server_by_path) - set(local_by_path))
@@ -769,19 +883,14 @@ class ClientService:
             if choice in {"update", "select", "abort"}:
                 return choice
 
-    def _select_server_thread_checkpoints(
+    def _select_server_threads(
         self,
         slug: str,
-        checkpoints: list[ThreadCheckpoint],
+        thread_summaries: list[ThreadSummary],
         *,
         assume_yes: bool,
         diff: DiffSummary,
-    ) -> list[ThreadCheckpoint] | None:
-        thread_summaries = [
-            self._summary_from_checkpoint(checkpoint)
-            for checkpoint in checkpoints
-            if checkpoint.thread_id
-        ]
+    ) -> list[str] | None:
         if not thread_summaries:
             if diff.has_mismatch and not assume_yes:
                 message = (
@@ -790,15 +899,15 @@ class ClientService:
                 )
                 if input(f"{message} [y/N]: ").strip().lower() not in {"y", "yes"}:
                     return None
-            return checkpoints
+            return []
         if assume_yes:
-            return checkpoints
+            return [summary.thread_id for summary in thread_summaries]
 
         choice = self._prompt_thread_update_mode(slug, diff, thread_summaries)
         if choice == "abort":
             return None
         if choice == "update":
-            return checkpoints
+            return [summary.thread_id for summary in thread_summaries]
 
         selected_ids: set[str] = set()
         for summary in sorted(thread_summaries, key=lambda item: (item.updated_at, item.thread_name), reverse=True):
@@ -808,7 +917,7 @@ class ClientService:
             )
             if input(prompt).strip().lower() in {"y", "yes"}:
                 selected_ids.add(summary.thread_id)
-        return [checkpoint for checkpoint in checkpoints if checkpoint.thread_id in selected_ids]
+        return [summary.thread_id for summary in thread_summaries if summary.thread_id in selected_ids]
 
     def update_from_server(self, slug: str, *, assume_yes: bool = False) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
@@ -816,13 +925,11 @@ class ClientService:
             raise RuntimeError("Managed root is not configured for this superproject.")
         self.report_progress(f"Connecting to the server for '{slug}'...")
         managed_root = Path(local_state.managed_root)
-        server_state = self.api_client().pull_state(slug)
-        self._adopt_server_name(local_state, server_state.manifest.name)
+        api = self.api_client()
+        metadata = self._load_update_metadata(api, slug)
+        self._adopt_server_name(local_state, metadata.manifest.name)
         self.report_progress(f"Comparing local Markdown for '{slug}' with the server copy...")
-        server_by_path = {
-            document.record.relative_path: document.record
-            for document in server_state.managed_documents
-        }
+        server_by_path = {record.relative_path: record for record in metadata.manifest.managed_files}
         local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
         local_by_path = {document.record.relative_path: document.record for document in local_documents}
         diff = DiffSummary(
@@ -834,25 +941,44 @@ class ClientService:
                 if server_by_path[path].sha256 != local_by_path[path].sha256
             ),
         )
-        checkpoints_with_raw_bundles = self._newer_thread_checkpoints(local_state, server_state)
-        diff.thread_updates = self._dedupe_thread_ids(
-            [checkpoint.thread_id for checkpoint in checkpoints_with_raw_bundles if checkpoint.thread_id]
-        )
-        shared_checkpoint = getattr(server_state, "shared_checkpoint", None)
+        thread_updates = [
+            summary
+            for summary in metadata.threads
+            if summary.revision is not None
+            and summary.revision > local_state.pending_thread_refreshes.get(summary.thread_id, 0)
+        ]
+        diff.thread_updates = self._dedupe_thread_ids([summary.thread_id for summary in thread_updates])
         apply_shared_checkpoint = (
-            shared_checkpoint is not None
-            and shared_checkpoint.shared_bundle is not None
-            and self._checkpoint_needs_local_refresh(local_state, shared_checkpoint)
+            metadata.shared_checkpoint is not None
+            and metadata.shared_checkpoint.revision > local_state.last_shared_bundle_revision
         )
-        selected_checkpoints = self._select_server_thread_checkpoints(
+        selected_thread_ids = self._select_server_threads(
             slug,
-            checkpoints_with_raw_bundles,
+            thread_updates,
             assume_yes=assume_yes,
             diff=diff,
         )
-        if selected_checkpoints is None:
+        if selected_thread_ids is None:
             self.report_progress(f"Update from server aborted for '{slug}'.")
             return diff
+        if not (diff.has_mismatch or apply_shared_checkpoint or selected_thread_ids):
+            local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
+            local_state.last_aligned_revision = metadata.manifest.revision
+            config = self.config()
+            config.superprojects[slug] = local_state
+            self.save_config(config)
+            self.report_progress(f"No server updates were pending for '{slug}'.")
+            return diff
+        package = self._fetch_update_package(
+            api,
+            slug,
+            UpdatePackageRequest(
+                thread_ids=selected_thread_ids,
+                include_shared_checkpoint=apply_shared_checkpoint,
+                include_managed_documents=diff.has_mismatch,
+                include_shared_skills=True,
+            ),
+        )
         self.report_progress(f"Applying server updates for '{slug}'...")
         quarantine_root = self.state_store.paths.cache_dir / "quarantine" / slug / utc_now().strftime("%Y%m%d%H%M%S")
         for path in diff.new_local:
@@ -862,17 +988,22 @@ class ClientService:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(source.read_bytes())
                 source.unlink()
-        for document in server_state.managed_documents:
+        for document in package.managed_documents:
             target = managed_root / document.record.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(target, document.content)
         self.report_progress(f"Syncing shared skills for '{slug}'...")
-        self._write_shared_skills(server_state.shared_skills)
-        if apply_shared_checkpoint:
+        self._write_shared_skills(package.shared_skills)
+        if (
+            apply_shared_checkpoint
+            and package.shared_checkpoint is not None
+            and package.shared_checkpoint.shared_bundle is not None
+        ):
             self.report_progress(f"Applying the shared Codex runtime bundle for '{slug}'...")
-            self._apply_shared_bundle(shared_checkpoint.shared_bundle)
-            self._record_thread_revision(slug, shared_checkpoint, shared_checkpoint.revision)
+            self._apply_shared_bundle(package.shared_checkpoint.shared_bundle)
+            self._record_thread_revision(slug, package.shared_checkpoint, package.shared_checkpoint.revision)
             local_state = self._get_superproject_state(slug)
+        selected_checkpoints = package.thread_checkpoints
         if selected_checkpoints:
             if len(selected_checkpoints) == 1:
                 self.report_progress(f"Applying the latest Codex session bundle for '{slug}'...")
@@ -893,10 +1024,10 @@ class ClientService:
                 self.report_progress(f"Updated {thread_labels} for '{slug}'.")
             local_state = self._get_superproject_state(slug)
         local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
-        local_state.last_aligned_revision = server_state.manifest.revision
+        local_state.last_aligned_revision = metadata.manifest.revision
         server_file_ids = {
-            document.record.relative_path: document.record.file_id
-            for document in server_state.managed_documents
+            record.relative_path: record.file_id
+            for record in metadata.manifest.managed_files
         }
         local_documents, updated_ids = build_managed_documents(managed_root, server_file_ids)
         local_state.managed_file_ids = updated_ids

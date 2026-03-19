@@ -41,6 +41,10 @@ class _RecordingService:
         self.calls.append(("rename_superproject", (slug, new_name)))
         return {"slug": slug, "name": new_name}
 
+    def rename_thread(self, slug: str, thread_ref: str, new_name: str):
+        self.calls.append(("rename_thread", (slug, thread_ref, new_name)))
+        return {"slug": slug, "thread_id": "thread-a", "name": new_name, "name_manually_set": True}
+
     def force_thread_updates(self, slug: str, *, steal: bool = False):
         self.calls.append(("force_thread_updates", (slug, steal)))
         return [{"thread_id": "thread-a", "revision": 7}]
@@ -118,6 +122,20 @@ def test_run_shell_command_renames_superproject(capsys) -> None:
     captured = capsys.readouterr()
     assert service.calls == [("rename_superproject", ("telegram-bots-suite", "Telegram Bots Suite"))]
     assert '"name": "Telegram Bots Suite"' in captured.out
+
+
+def test_run_shell_command_renames_thread(capsys) -> None:
+    service = _RecordingService()
+
+    run_shell_command(
+        service,
+        "rename-thread",
+        ["telegram-bots-suite", "thread-a", "My", "Manual", "Thread"],
+    )
+
+    captured = capsys.readouterr()
+    assert service.calls == [("rename_thread", ("telegram-bots-suite", "thread-a", "My Manual Thread"))]
+    assert '"name_manually_set": true' in captured.out.lower()
 
 
 def test_run_shell_command_force_pushes_tracked_threads(capsys) -> None:
