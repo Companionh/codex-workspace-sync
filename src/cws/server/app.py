@@ -9,6 +9,7 @@ from cws.config import ServerPaths
 from cws.models import (
     AcquireLeaseRequest,
     AcquireLeaseResponse,
+    CurrentLeaseResponse,
     CreateSuperprojectRequest,
     CreateSuperprojectResponse,
     HeartbeatRequest,
@@ -22,6 +23,7 @@ from cws.models import (
     RenameSuperprojectRequest,
     RenameSuperprojectResponse,
     ResolveMismatchRequest,
+    ServerInfoResponse,
     SuperprojectManifest,
     ThreadSummary,
     UpdateMetadataResponse,
@@ -56,6 +58,21 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/server-info", response_model=ServerInfoResponse)
+    def server_info(
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> ServerInfoResponse:
+        return service.server_info()
+
+    @app.get("/api/lease/current", response_model=CurrentLeaseResponse)
+    def current_lease(
+        resource_id: str = Query("global"),
+        _: str = Depends(authenticate),
+        service: ServerService = Depends(get_service),
+    ) -> CurrentLeaseResponse:
+        return CurrentLeaseResponse(lease=service.current_lease(resource_id))
+
     @app.get("/api/skills/shared")
     def shared_skills(
         _: str = Depends(authenticate),
@@ -82,7 +99,7 @@ def create_app() -> FastAPI:
         if device_id != request.device_id:
             raise HTTPException(status_code=403, detail="Device mismatch.")
         try:
-            return service.heartbeat(device_id)
+            return service.heartbeat(device_id, resource_id=request.resource_id)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -94,7 +111,7 @@ def create_app() -> FastAPI:
     ) -> HeartbeatResponse:
         if device_id != request.device_id:
             raise HTTPException(status_code=403, detail="Device mismatch.")
-        lease = service.release_lease(device_id)
+        lease = service.release_lease(device_id, resource_id=request.resource_id)
         return HeartbeatResponse(lease=lease, accepted=True)
 
     @app.post("/api/superprojects", response_model=CreateSuperprojectResponse)

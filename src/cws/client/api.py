@@ -8,6 +8,7 @@ import httpx
 from cws.models import (
     AcquireLeaseRequest,
     AcquireLeaseResponse,
+    CurrentLeaseResponse,
     CreateSuperprojectRequest,
     CreateSuperprojectResponse,
     HeartbeatRequest,
@@ -20,6 +21,7 @@ from cws.models import (
     RenameThreadResponse,
     RenameSuperprojectRequest,
     RenameSuperprojectResponse,
+    ServerInfoResponse,
     SuperprojectManifest,
     ThreadSummary,
     ThreadCheckpoint,
@@ -60,20 +62,28 @@ class ApiClient:
         response.raise_for_status()
         return response
 
-    def acquire_lease(self, steal: bool = False) -> AcquireLeaseResponse:
-        payload = AcquireLeaseRequest(device_id=self.device_id, steal=steal)
+    def acquire_lease(self, *, resource_id: str = "global", steal: bool = False) -> AcquireLeaseResponse:
+        payload = AcquireLeaseRequest(device_id=self.device_id, resource_id=resource_id, steal=steal)
         response = self._request("POST", "/api/lease/acquire", json=payload.model_dump(mode="json"))
         return AcquireLeaseResponse.model_validate(response.json())
 
-    def heartbeat(self) -> HeartbeatResponse:
-        payload = HeartbeatRequest(device_id=self.device_id)
+    def heartbeat(self, *, resource_id: str = "global") -> HeartbeatResponse:
+        payload = HeartbeatRequest(device_id=self.device_id, resource_id=resource_id)
         response = self._request("POST", "/api/lease/heartbeat", json=payload.model_dump(mode="json"))
         return HeartbeatResponse.model_validate(response.json())
 
-    def release_lease(self) -> HeartbeatResponse:
-        payload = HeartbeatRequest(device_id=self.device_id)
+    def release_lease(self, *, resource_id: str = "global") -> HeartbeatResponse:
+        payload = HeartbeatRequest(device_id=self.device_id, resource_id=resource_id)
         response = self._request("POST", "/api/lease/release", json=payload.model_dump(mode="json"))
         return HeartbeatResponse.model_validate(response.json())
+
+    def current_lease(self, *, resource_id: str = "global") -> CurrentLeaseResponse:
+        response = self._request("GET", f"/api/lease/current", params={"resource_id": resource_id})
+        return CurrentLeaseResponse.model_validate(response.json())
+
+    def server_info(self) -> ServerInfoResponse:
+        response = self._request("GET", "/api/server-info")
+        return ServerInfoResponse.model_validate(response.json())
 
     def create_superproject(self, request: CreateSuperprojectRequest) -> CreateSuperprojectResponse:
         response = self._request("POST", "/api/superprojects", json=request.model_dump(mode="json"))
@@ -149,6 +159,8 @@ class ApiClient:
                     if state.shared_checkpoint is not None
                     else None
                 ),
+                shared_skills_revision=None,
+                shared_skills_count=len(state.shared_skills),
                 threads=threads,
                 pending_resolutions=state.pending_resolutions,
             )
@@ -169,6 +181,7 @@ class ApiClient:
             return UpdatePackageResponse(
                 manifest=state.manifest,
                 shared_checkpoint=state.shared_checkpoint if request.include_shared_checkpoint else None,
+                shared_skills_revision=None,
                 thread_checkpoints=[
                     checkpoint
                     for checkpoint in state.thread_checkpoints

@@ -181,8 +181,19 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
 
     if command == "update-from-server":
         slug = _resolve_shell_superproject(args)
-        diff = client.update_from_server(slug)
+        dry_run = "--dry-run" in args
+        if dry_run:
+            diff = client.update_from_server(slug, dry_run=True)
+        else:
+            diff = client.update_from_server(slug)
         typer.echo(json.dumps(diff.__dict__, indent=2))
+        return
+    if command == "doctor":
+        slug = _positional_args(args)[0] if _positional_args(args) else None
+        typer.echo(json.dumps(client.doctor(slug).model_dump(mode="json"), indent=2))
+        return
+    if command == "queue-status":
+        typer.echo(json.dumps(client.queue_status(), indent=2))
         return
     if command == "threadlist":
         slug = _resolve_shell_superproject(args)
@@ -216,6 +227,19 @@ def run_shell_command(client: ClientService, command: str, args: list[str]) -> N
         thread_ref = positional[1]
         new_name = " ".join(positional[2:])
         typer.echo(json.dumps(client.rename_thread(slug, thread_ref, new_name), indent=2))
+        return
+    if command in {"untrack-thread", "remove-thread"}:
+        slug = _resolve_shell_superproject(args)
+        positional = _positional_args(args)
+        if len(positional) < 2:
+            raise RuntimeError("Missing thread reference")
+        typer.echo(json.dumps(client.untrack_thread(slug, positional[1]), indent=2))
+        return
+    if command == "set-lease-scope":
+        positional = _positional_args(args)
+        if not positional:
+            raise RuntimeError("Missing lease scope")
+        typer.echo(json.dumps(client.set_lease_scope(positional[0]), indent=2))
         return
     if command == "override-current-state":
         slug = _resolve_shell_superproject(args)
@@ -284,6 +308,18 @@ def status() -> None:
     typer.echo(json.dumps(service().status(), indent=2))
 
 
+@app.command("doctor")
+def doctor(
+    superproject: str | None = typer.Argument(None),
+) -> None:
+    typer.echo(json.dumps(service().doctor(superproject).model_dump(mode="json"), indent=2))
+
+
+@app.command("queue-status")
+def queue_status() -> None:
+    typer.echo(json.dumps(service().queue_status(), indent=2))
+
+
 @app.command("enroll-device")
 def enroll_device() -> None:
     try:
@@ -340,9 +376,10 @@ def delete_superproject_server(
 def update_from_server(
     superproject: str | None = typer.Argument(None),
     superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+    dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     slug = _resolve_cli_superproject(superproject, superproject_option)
-    diff = service().update_from_server(slug)
+    diff = service().update_from_server(slug, dry_run=dry_run)
     typer.echo(json.dumps(diff.__dict__, indent=2))
 
 
@@ -389,6 +426,33 @@ def rename_thread(
 ) -> None:
     slug = _resolve_cli_superproject(superproject, superproject_option)
     typer.echo(json.dumps(service().rename_thread(slug, thread_ref, new_name), indent=2))
+
+
+@app.command("untrack-thread")
+def untrack_thread(
+    superproject: str | None = typer.Argument(None),
+    thread_ref: str = typer.Argument(...),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps(service().untrack_thread(slug, thread_ref), indent=2))
+
+
+@app.command("remove-thread")
+def remove_thread(
+    superproject: str | None = typer.Argument(None),
+    thread_ref: str = typer.Argument(...),
+    superproject_option: str | None = typer.Option(None, "--superproject", hidden=True),
+) -> None:
+    slug = _resolve_cli_superproject(superproject, superproject_option)
+    typer.echo(json.dumps(service().untrack_thread(slug, thread_ref), indent=2))
+
+
+@app.command("set-lease-scope")
+def set_lease_scope(
+    scope: str = typer.Argument(...),
+) -> None:
+    typer.echo(json.dumps(service().set_lease_scope(scope), indent=2))
 
 
 @app.command("override-current-state")

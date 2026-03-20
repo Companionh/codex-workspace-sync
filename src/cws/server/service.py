@@ -33,6 +33,7 @@ from cws.models import (
     RegisterDeviceResponse,
     RenameThreadResponse,
     RenameSuperprojectResponse,
+    ServerInfoResponse,
     SharedCheckpointMetadata,
     SuperprojectManifest,
     ThreadSummary,
@@ -135,16 +136,18 @@ class ServerService:
             metadata=json.loads(row["metadata_json"]),
         )
 
-    def _load_lease(self) -> LeaseRecord:
+    def _load_lease(self, resource_id: str = "global") -> LeaseRecord:
         with self.db.connect() as connection:
             row = connection.execute(
                 """
                 SELECT resource_id, device_id, acquired_at, last_heartbeat_at, heartbeat_timeout_seconds
-                FROM leases WHERE resource_id = 'global'
+                FROM leases WHERE resource_id = ?
                 """
+                ,
+                (resource_id,),
             ).fetchone()
         if row is None:
-            return LeaseRecord(heartbeat_timeout_seconds=self.heartbeat_timeout_seconds)
+            return LeaseRecord(resource_id=resource_id, heartbeat_timeout_seconds=self.heartbeat_timeout_seconds)
         lease = LeaseRecord(
             resource_id=row["resource_id"],
             device_id=row["device_id"],
@@ -159,6 +162,7 @@ class ServerService:
             expiration = lease.last_heartbeat_at + timedelta(seconds=lease.heartbeat_timeout_seconds)
             if expiration <= utc_now():
                 expired = LeaseRecord(
+                    resource_id=resource_id,
                     state=LeaseState.EXPIRED,
                     heartbeat_timeout_seconds=lease.heartbeat_timeout_seconds,
                 )
@@ -194,7 +198,7 @@ class ServerService:
             connection.commit()
 
     def acquire_lease(self, request: AcquireLeaseRequest) -> AcquireLeaseResponse:
-        lease = self._load_lease()
+        lease = self._load_lease(request.resource_id)
         if lease.device_id and lease.device_id != request.device_id and not request.steal:
             lease.state = LeaseState.ACTIVE
             return AcquireLeaseResponse(
@@ -211,8 +215,8 @@ class ServerService:
         self._write_lease(lease)
         return AcquireLeaseResponse(lease=lease, granted=True)
 
-    def heartbeat(self, device_id: str) -> HeartbeatResponse:
-        lease = self._load_lease()
+    def heartbeat(self, device_id: str, *, resource_id: str = "global") -> HeartbeatResponse:
+        lease = self._load_lease(resource_id)
         if lease.device_id != device_id:
             return HeartbeatResponse(lease=lease, accepted=False)
         lease.last_heartbeat_at = utc_now()
@@ -220,8 +224,8 @@ class ServerService:
         self._write_lease(lease)
         return HeartbeatResponse(lease=lease, accepted=True)
 
-    def release_lease(self, device_id: str, *, force: bool = False) -> LeaseRecord:
-        lease = self._load_lease()
+    def release_lease(self, device_id: str, *, resource_id: str = "global", force: bool = False) -> LeaseRecord:
+        lease = self._load_lease(resource_id)
         if lease.device_id != device_id and not force:
             return lease
         lease.device_id = None
@@ -231,6 +235,9 @@ class ServerService:
         lease.state = LeaseState.AVAILABLE
         self._write_lease(lease)
         return lease
+
+    def current_lease(self, resource_id: str = "global") -> LeaseRecord:
+        return self._load_lease(resource_id)
 
     def _superproject_root(self, slug: str) -> Path:
         return self.paths.state_root / "superprojects" / slug
@@ -248,6 +255,7 @@ class ServerService:
     ) -> SuperprojectManifest:
         now = utc_now()
         root = self._superproject_root(slug)
+        _, shared_skill_revision = self._shared_skill_catalog()
         managed_files: list[ManagedFileRecord] = []
         for directory in (
             "baseline",
@@ -320,6 +328,7 @@ class ServerService:
             created_at=now,
             updated_at=now,
             revision=0,
+            shared_skill_catalog_revision=shared_skill_revision or "v1",
             subprojects=subprojects,
             managed_files=managed_files,
         )
@@ -403,6 +412,70 @@ class ServerService:
         thread = self._thread_summary(slug, normalized_thread_id, updated_at=updated_at)
         return RenameThreadResponse(thread=thread)
 
+    def _thread_metadata_cache(self, slug: str) -> dict[str, dict[str, Any]]:
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT thread_id, cached_thread_name, cached_last_user_turn_preview, updated_at, revision, source_device_id
+                FROM thread_metadata
+                WHERE superproject_slug = ?
+                ORDER BY updated_at DESC
+                """,
+                (slug,),
+            ).fetchall()
+        return {
+            row["thread_id"]: {
+                "thread_name": row["cached_thread_name"],
+                "last_user_turn_preview": row["cached_last_user_turn_preview"],
+                "updated_at": datetime.fromisoformat(row["updated_at"]),
+                "revision": row["revision"],
+                "source_device_id": row["source_device_id"],
+            }
+            for row in rows
+        }
+
+    def _cache_thread_metadata(
+        self,
+        slug: str,
+        checkpoint: ThreadCheckpoint,
+        *,
+        thread_name: str | None,
+        last_user_turn_preview: str | None,
+        updated_at: datetime,
+    ) -> None:
+        if not checkpoint.thread_id:
+            return
+        with self.db.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO thread_metadata (
+                    superproject_slug,
+                    thread_id,
+                    cached_thread_name,
+                    cached_last_user_turn_preview,
+                    updated_at,
+                    revision,
+                    source_device_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(superproject_slug, thread_id) DO UPDATE SET
+                    cached_thread_name = excluded.cached_thread_name,
+                    cached_last_user_turn_preview = excluded.cached_last_user_turn_preview,
+                    updated_at = excluded.updated_at,
+                    revision = excluded.revision,
+                    source_device_id = excluded.source_device_id
+                """,
+                (
+                    slug,
+                    checkpoint.thread_id,
+                    thread_name,
+                    last_user_turn_preview,
+                    updated_at.isoformat(),
+                    checkpoint.revision,
+                    checkpoint.source_device_id,
+                ),
+            )
+            connection.commit()
+
     def get_manifest(self, slug: str) -> SuperprojectManifest:
         with self.db.connect() as connection:
             row = connection.execute(
@@ -411,7 +484,11 @@ class ServerService:
             ).fetchone()
         if row is None:
             raise FileNotFoundError(f"Unknown superproject: {slug}")
-        return SuperprojectManifest.model_validate(json.loads(row["manifest_json"]))
+        manifest = SuperprojectManifest.model_validate(json.loads(row["manifest_json"]))
+        _, shared_skill_revision = self._shared_skill_catalog()
+        if shared_skill_revision and manifest.shared_skill_catalog_revision != shared_skill_revision:
+            manifest = manifest.model_copy(update={"shared_skill_catalog_revision": shared_skill_revision})
+        return manifest
 
     def _save_manifest(self, manifest: SuperprojectManifest) -> None:
         with self.db.connect() as connection:
@@ -512,24 +589,48 @@ class ServerService:
         return [MismatchResolution.model_validate(json.loads(row["payload_json"])) for row in rows]
 
     def _shared_skills(self) -> list[RawFileArtifact]:
+        artifacts, _ = self._shared_skill_catalog()
+        return artifacts
+
+    def _shared_skill_catalog(self) -> tuple[list[RawFileArtifact], str | None]:
         root = self.paths.shared_skills_root
         if not root.exists():
-            return []
+            return [], None
         artifacts: list[RawFileArtifact] = []
+        digest_entries: list[dict[str, str]] = []
         for path in sorted(root.rglob("*")):
             if path.is_dir():
                 continue
+            sha = sha256_file(path)
             artifacts.append(
                 RawFileArtifact(
                     relative_path=relative_posix(path, root),
-                    sha256=sha256_file(path),
+                    sha256=sha,
                     content_b64=encode_b64(path.read_bytes()),
                 )
             )
-        return artifacts
+            digest_entries.append(
+                {
+                    "relative_path": relative_posix(path, root),
+                    "sha256": sha,
+                }
+            )
+        revision = sha256_text(json.dumps(digest_entries, sort_keys=True)) if digest_entries else None
+        return artifacts, revision
+
+    def server_info(self) -> ServerInfoResponse:
+        artifacts, revision = self._shared_skill_catalog()
+        return ServerInfoResponse(
+            schema_version=self.db.schema_version(),
+            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
+            scoped_leases_supported=True,
+            shared_skills_revision=revision,
+            shared_skills_count=len(artifacts),
+        )
 
     def pull_state(self, slug: str) -> PullStateResponse:
         manifest = self.get_manifest(slug)
+        shared_skills, _ = self._shared_skill_catalog()
         return PullStateResponse(
             manifest=manifest,
             latest_checkpoint=self._latest_checkpoint(slug),
@@ -544,12 +645,13 @@ class ServerService:
                 for record in manifest.managed_files
                 if (self._superproject_root(slug) / record.relative_path).exists()
             ],
-            shared_skills=self._shared_skills(),
+            shared_skills=shared_skills,
         )
 
     def update_metadata(self, slug: str) -> UpdateMetadataResponse:
         manifest = self.get_manifest(slug)
         shared_checkpoint = self._latest_shared_checkpoint(slug)
+        shared_skills, shared_skills_revision = self._shared_skill_catalog()
         return UpdateMetadataResponse(
             manifest=manifest,
             shared_checkpoint=(
@@ -560,6 +662,8 @@ class ServerService:
                 if shared_checkpoint is not None
                 else None
             ),
+            shared_skills_revision=shared_skills_revision,
+            shared_skills_count=len(shared_skills),
             threads=self.list_threads(slug),
             pending_resolutions=self._pending_resolutions(slug),
         )
@@ -568,6 +672,7 @@ class ServerService:
         manifest = self.get_manifest(slug)
         checkpoint_map = self._latest_thread_checkpoint_map(slug)
         thread_ids = list(dict.fromkeys(thread_id for thread_id in request.thread_ids if thread_id))
+        shared_skills, shared_skills_revision = self._shared_skill_catalog()
         thread_checkpoints = [
             checkpoint_map[thread_id]
             for thread_id in thread_ids
@@ -576,6 +681,7 @@ class ServerService:
         return UpdatePackageResponse(
             manifest=manifest,
             shared_checkpoint=self._latest_shared_checkpoint(slug) if request.include_shared_checkpoint else None,
+            shared_skills_revision=shared_skills_revision,
             thread_checkpoints=thread_checkpoints,
             managed_documents=[
                 ManagedDocument(
@@ -586,7 +692,7 @@ class ServerService:
                 if request.include_managed_documents
                 and (self._superproject_root(slug) / record.relative_path).exists()
             ],
-            shared_skills=self._shared_skills() if request.include_shared_skills else [],
+            shared_skills=shared_skills if request.include_shared_skills else [],
             pending_resolutions=self._pending_resolutions(slug),
         )
 
@@ -703,21 +809,33 @@ class ServerService:
         *,
         checkpoint: ThreadCheckpoint | None = None,
         overrides: dict[str, dict[str, Any]] | None = None,
+        cached: dict[str, Any] | None = None,
         updated_at: datetime | None = None,
     ) -> ThreadSummary:
         effective_overrides = overrides if overrides is not None else self._thread_name_overrides(slug)
         checkpoint_value = checkpoint or self._latest_checkpoint(slug, thread_id)
         override = effective_overrides.get(thread_id)
-        derived_name = (
-            self._thread_name_from_raw_bundle(checkpoint_value)
-            if checkpoint_value is not None
-            else None
-        )
-        derived_preview = (
-            self._preview_from_raw_bundle(checkpoint_value)
-            if checkpoint_value is not None
-            else None
-        )
+        cached_metadata = cached or self._thread_metadata_cache(slug).get(thread_id)
+        if cached_metadata is None and checkpoint_value is not None:
+            derived_name = self._thread_name_from_raw_bundle(checkpoint_value)
+            derived_preview = self._preview_from_raw_bundle(checkpoint_value)
+            cached_updated_at = (
+                (checkpoint_value.raw_bundle.thread_updated_at if checkpoint_value.raw_bundle else None)
+                or checkpoint_value.created_at
+            )
+            self._cache_thread_metadata(
+                slug,
+                checkpoint_value,
+                thread_name=derived_name or (checkpoint_value.raw_bundle.thread_name if checkpoint_value.raw_bundle else None),
+                last_user_turn_preview=(
+                    (checkpoint_value.raw_bundle.last_user_turn_preview if checkpoint_value.raw_bundle else None)
+                    or derived_preview
+                ),
+                updated_at=cached_updated_at,
+            )
+            cached_metadata = self._thread_metadata_cache(slug).get(thread_id)
+        derived_name = cached_metadata["thread_name"] if cached_metadata else None
+        derived_preview = cached_metadata["last_user_turn_preview"] if cached_metadata else None
         override_updated_at = override["updated_at"] if override else None
         return ThreadSummary(
             thread_id=thread_id,
@@ -730,17 +848,23 @@ class ServerService:
                 or thread_id
             ),
             updated_at=(
-                (checkpoint_value.raw_bundle.thread_updated_at if checkpoint_value and checkpoint_value.raw_bundle else None)
+                (cached_metadata["updated_at"] if cached_metadata else None)
+                or (checkpoint_value.raw_bundle.thread_updated_at if checkpoint_value and checkpoint_value.raw_bundle else None)
                 or (checkpoint_value.created_at if checkpoint_value is not None else None)
                 or updated_at
                 or override_updated_at
                 or utc_now()
             ),
             last_user_turn_preview=(
-                (checkpoint_value.raw_bundle.last_user_turn_preview if checkpoint_value and checkpoint_value.raw_bundle else None)
+                (cached_metadata["last_user_turn_preview"] if cached_metadata else None)
+                or (checkpoint_value.raw_bundle.last_user_turn_preview if checkpoint_value and checkpoint_value.raw_bundle else None)
                 or derived_preview
             ),
-            revision=checkpoint_value.revision if checkpoint_value is not None else None,
+            revision=(
+                int(cached_metadata["revision"])
+                if cached_metadata and cached_metadata.get("revision") is not None
+                else (checkpoint_value.revision if checkpoint_value is not None else None)
+            ),
             name_manually_set=override is not None,
             tracked=checkpoint_value is not None or override is not None,
             source="server",
@@ -749,10 +873,12 @@ class ServerService:
     def list_threads(self, slug: str) -> list[ThreadSummary]:
         checkpoint_map = self._latest_thread_checkpoint_map(slug)
         overrides = self._thread_name_overrides(slug)
+        metadata_cache = self._thread_metadata_cache(slug)
         thread_ids = list(
             dict.fromkeys(
                 [thread_id for thread_id in checkpoint_map if thread_id]
                 + list(overrides.keys())
+                + list(metadata_cache.keys())
             )
         )
         summaries = [
@@ -761,6 +887,7 @@ class ServerService:
                 thread_id,
                 checkpoint=checkpoint_map.get(thread_id),
                 overrides=overrides,
+                cached=metadata_cache.get(thread_id),
             )
             for thread_id in thread_ids
         ]
@@ -768,19 +895,32 @@ class ServerService:
 
     def delete_superproject(self, slug: str, *, requesting_device_id: str, force: bool = False) -> dict[str, object]:
         manifest = self.get_manifest(slug)
-        lease = self._load_lease()
-        if lease.device_id and lease.device_id != requesting_device_id and not force:
+        leases = [
+            self._load_lease(),
+            self._load_lease(f"superproject:{slug}"),
+        ]
+        blocking_lease = next(
+            (
+                lease
+                for lease in leases
+                if lease.device_id and lease.device_id != requesting_device_id and not force
+            ),
+            None,
+        )
+        if blocking_lease is not None:
             raise PermissionError(
-                f"Another device currently holds the active lease: {lease.device_id}"
+                f"Another device currently holds the active lease: {blocking_lease.device_id}"
             )
-        if lease.device_id and (lease.device_id == requesting_device_id or force):
-            self.release_lease(lease.device_id, force=True)
+        for lease in leases:
+            if lease.device_id and (lease.device_id == requesting_device_id or force):
+                self.release_lease(lease.device_id, resource_id=lease.resource_id, force=True)
 
         with self.db.connect() as connection:
             connection.execute("DELETE FROM checkpoints WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM mismatch_resolutions WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM backups WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM thread_names WHERE superproject_slug = ?", (slug,))
+            connection.execute("DELETE FROM thread_metadata WHERE superproject_slug = ?", (slug,))
             connection.execute("DELETE FROM superprojects WHERE slug = ?", (slug,))
             connection.commit()
 
@@ -999,6 +1139,7 @@ class ServerService:
             else None
         )
         revision = current_manifest.revision + 1
+        _, shared_skills_revision = self._shared_skill_catalog()
         checkpoint = request.checkpoint.model_copy(
             update={
                 "revision": revision,
@@ -1034,6 +1175,7 @@ class ServerService:
             update={
                 "revision": revision,
                 "updated_at": checkpoint.created_at,
+                "shared_skill_catalog_revision": shared_skills_revision or incoming_manifest.shared_skill_catalog_revision,
                 "managed_files": [
                     record.model_copy(update={"last_known_good_revision": revision})
                     for record in incoming_manifest.managed_files
@@ -1041,6 +1183,17 @@ class ServerService:
             }
         )
         self._save_manifest(updated_manifest)
+        if checkpoint.canonical and checkpoint.thread_id and checkpoint.raw_bundle is not None:
+            derived_name = self._thread_name_from_raw_bundle(checkpoint)
+            derived_preview = self._preview_from_raw_bundle(checkpoint)
+            metadata_updated_at = checkpoint.raw_bundle.thread_updated_at or checkpoint.created_at
+            self._cache_thread_metadata(
+                checkpoint.superproject_slug,
+                checkpoint,
+                thread_name=derived_name or checkpoint.raw_bundle.thread_name,
+                last_user_turn_preview=checkpoint.raw_bundle.last_user_turn_preview or derived_preview,
+                updated_at=metadata_updated_at,
+            )
         with self.db.connect() as connection:
             connection.execute(
                 """

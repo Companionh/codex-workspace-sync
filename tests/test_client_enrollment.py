@@ -745,7 +745,6 @@ def test_update_from_server_reports_progress_steps(tmp_path) -> None:
         "Connecting to the server for 'telegram-bots-suite'...",
         "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
         "Applying server updates for 'telegram-bots-suite'...",
-        "Syncing shared skills for 'telegram-bots-suite'...",
         "Update from server finished for 'telegram-bots-suite'.",
     ]
 
@@ -839,7 +838,6 @@ def test_update_from_server_reports_updated_thread_ids(tmp_path) -> None:
         "Connecting to the server for 'telegram-bots-suite'...",
         "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
         "Applying server updates for 'telegram-bots-suite'...",
-        "Syncing shared skills for 'telegram-bots-suite'...",
         "Applying the latest Codex session bundle for 'telegram-bots-suite'...",
         "Updated Codex thread(s) for 'telegram-bots-suite': thread-a, thread-b.",
         "Update from server finished for 'telegram-bots-suite'.",
@@ -1083,7 +1081,6 @@ def test_update_from_server_skips_already_applied_thread_revisions(tmp_path) -> 
         "Connecting to the server for 'telegram-bots-suite'...",
         "Comparing local Markdown for 'telegram-bots-suite' with the server copy...",
         "Applying server updates for 'telegram-bots-suite'...",
-        "Syncing shared skills for 'telegram-bots-suite'...",
         "Applying the shared Codex runtime bundle for 'telegram-bots-suite'...",
         "Update from server finished for 'telegram-bots-suite'.",
     ]

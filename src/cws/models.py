@@ -26,6 +26,17 @@ class LeaseState(StrEnum):
     AVAILABLE = "available"
 
 
+class LeaseScope(StrEnum):
+    GLOBAL = "global"
+    SUPERPROJECT = "superproject"
+
+
+class DoctorStatus(StrEnum):
+    OK = "ok"
+    WARNING = "warning"
+    ERROR = "error"
+
+
 class DeviceRecord(BaseModel):
     device_id: str
     device_name: str
@@ -151,6 +162,7 @@ class RegisterDeviceResponse(BaseModel):
 
 class AcquireLeaseRequest(BaseModel):
     device_id: str
+    resource_id: str = "global"
     steal: bool = False
 
 
@@ -162,11 +174,16 @@ class AcquireLeaseResponse(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     device_id: str
+    resource_id: str = "global"
 
 
 class HeartbeatResponse(BaseModel):
     lease: LeaseRecord
     accepted: bool
+
+
+class CurrentLeaseResponse(BaseModel):
+    lease: LeaseRecord
 
 
 class CreateSuperprojectRequest(BaseModel):
@@ -214,6 +231,8 @@ class SharedCheckpointMetadata(BaseModel):
 class UpdateMetadataResponse(BaseModel):
     manifest: SuperprojectManifest
     shared_checkpoint: SharedCheckpointMetadata | None = None
+    shared_skills_revision: str | None = None
+    shared_skills_count: int = 0
     threads: list[ThreadSummary] = Field(default_factory=list)
     pending_resolutions: list[MismatchResolution] = Field(default_factory=list)
 
@@ -228,6 +247,7 @@ class UpdatePackageRequest(BaseModel):
 class UpdatePackageResponse(BaseModel):
     manifest: SuperprojectManifest
     shared_checkpoint: ThreadCheckpoint | None = None
+    shared_skills_revision: str | None = None
     thread_checkpoints: list[ThreadCheckpoint] = Field(default_factory=list)
     managed_documents: list[ManagedDocument] = Field(default_factory=list)
     shared_skills: list[RawFileArtifact] = Field(default_factory=list)
@@ -252,12 +272,45 @@ class OverrideStateRequest(BaseModel):
     checkpoint: ThreadCheckpoint
 
 
+class ServerInfoResponse(BaseModel):
+    schema_version: int
+    heartbeat_timeout_seconds: int
+    scoped_leases_supported: bool = True
+    shared_skills_revision: str | None = None
+    shared_skills_count: int = 0
+
+
 class BackupRecord(BaseModel):
     backup_id: str = Field(default_factory=lambda: str(uuid4()))
     superproject_slug: str
     thread_id: str | None = None
     created_at: datetime
     snapshot: dict[str, Any]
+
+
+class QueueHealth(BaseModel):
+    queued_count: int = 0
+    oldest_item_age_seconds: float | None = None
+    retry_count: int = 0
+    last_error: str | None = None
+
+
+class DoctorCheck(BaseModel):
+    name: str
+    status: DoctorStatus
+    detail: str
+
+
+class DoctorReport(BaseModel):
+    ok: bool
+    superproject_slug: str | None = None
+    lease_scope: LeaseScope = LeaseScope.GLOBAL
+    checks: list[DoctorCheck] = Field(default_factory=list)
+    queue_health: QueueHealth = Field(default_factory=QueueHealth)
+    stale_docs: bool = False
+    stale_shared_runtime: bool = False
+    stale_threads: list[str] = Field(default_factory=list)
+    stale_shared_skills: bool = False
 
 
 class ClientSuperprojectState(BaseModel):
@@ -270,6 +323,7 @@ class ClientSuperprojectState(BaseModel):
     last_alignment_action: AlignmentAction = AlignmentAction.NONE
     last_aligned_revision: int = 0
     last_shared_bundle_revision: int = 0
+    last_shared_skill_catalog_revision: str | None = None
     last_local_snapshot_hash: str | None = None
     pending_thread_refreshes: dict[str, int] = Field(default_factory=dict)
     managed_file_ids: dict[str, str] = Field(default_factory=dict)
@@ -282,6 +336,7 @@ class ClientConfig(BaseModel):
     ssh_host: str | None = None
     ssh_user: str | None = None
     ssh_port: int = 22
+    lease_scope: LeaseScope = LeaseScope.GLOBAL
     superprojects: dict[str, ClientSuperprojectState] = Field(default_factory=dict)
     sync_active_superproject: str | None = None
 
@@ -291,3 +346,6 @@ class OutboundQueueItem(BaseModel):
     superproject_slug: str
     created_at: datetime
     checkpoint: ThreadCheckpoint
+    retry_count: int = 0
+    last_attempt_at: datetime | None = None
+    last_error: str | None = None

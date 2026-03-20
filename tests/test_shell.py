@@ -13,8 +13,8 @@ class _RecordingService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
-    def update_from_server(self, slug: str):
-        self.calls.append(("update_from_server", (slug,)))
+    def update_from_server(self, slug: str, *, dry_run: bool = False):
+        self.calls.append(("update_from_server", (slug, dry_run)))
         return type(
             "Diff",
             (),
@@ -66,7 +66,7 @@ def test_run_shell_command_accepts_positional_superproject(capsys) -> None:
     run_shell_command(service, "update-from-server", ["telegram-bots-suite"])
 
     captured = capsys.readouterr()
-    assert service.calls == [("update_from_server", ("telegram-bots-suite",))]
+    assert service.calls == [("update_from_server", ("telegram-bots-suite", False))]
     assert '"changed": []' in captured.out
 
 
@@ -76,7 +76,7 @@ def test_run_shell_command_keeps_flagged_superproject_compatibility(capsys) -> N
     run_shell_command(service, "update-from-server", ["--superproject", "telegram-bots-suite"])
 
     captured = capsys.readouterr()
-    assert service.calls == [("update_from_server", ("telegram-bots-suite",))]
+    assert service.calls == [("update_from_server", ("telegram-bots-suite", False))]
     assert '"new_on_server": []' in captured.out
 
 

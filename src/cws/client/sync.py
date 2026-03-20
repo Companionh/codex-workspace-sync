@@ -29,10 +29,15 @@ from cws.models import (
     ClientConfig,
     ClientSuperprojectState,
     CreateSuperprojectRequest,
+    DoctorCheck,
+    DoctorReport,
+    DoctorStatus,
+    LeaseScope,
     ManagedDocument,
     MismatchResolution,
     OutboundQueueItem,
     PushCheckpointRequest,
+    QueueHealth,
     RawCodexSharedBundle,
     SubprojectRecord,
     ThreadSummary,
@@ -49,6 +54,12 @@ class DiffSummary:
     new_local: list[str]
     changed: list[str]
     thread_updates: list[str] = field(default_factory=list)
+    thread_update_names: list[str] = field(default_factory=list)
+    shared_runtime_update: bool = False
+    shared_runtime_revision: int | None = None
+    shared_skills_update: bool = False
+    shared_skills_revision: str | None = None
+    dry_run: bool = False
 
     @property
     def has_mismatch(self) -> bool:
@@ -70,10 +81,11 @@ class TransientHeartbeatError(RuntimeError):
 
 
 class SyncWorker(threading.Thread):
-    def __init__(self, service: "ClientService", superproject_slug: str) -> None:
+    def __init__(self, service: "ClientService", superproject_slug: str, resource_id: str = "global") -> None:
         super().__init__(daemon=True)
         self.service = service
         self.superproject_slug = superproject_slug
+        self.resource_id = resource_id
         self.stop_event = threading.Event()
         self.pending_checkpoints: dict[str, ThreadCheckpoint] = {}
         self.last_pushed_hashes: dict[str, str] = {}
@@ -181,7 +193,10 @@ class SyncWorker(threading.Thread):
 
     def _heartbeat(self, api: ApiClient) -> bool:
         try:
-            heartbeat = api.heartbeat()
+            try:
+                heartbeat = api.heartbeat(resource_id=self.resource_id)
+            except TypeError:
+                heartbeat = api.heartbeat()
         except httpx.HTTPError as exc:
             raise TransientHeartbeatError(str(exc)) from exc
         if heartbeat.accepted:
@@ -223,6 +238,27 @@ class ClientService:
         if not secret:
             raise RuntimeError("Device secret is missing.")
         return ApiClient(config.server_url, config.device_id, secret)
+
+    @staticmethod
+    def _api_acquire_lease(api: ApiClient, *, resource_id: str, steal: bool = False):
+        try:
+            return api.acquire_lease(resource_id=resource_id, steal=steal)
+        except TypeError:
+            return api.acquire_lease(steal=steal)
+
+    @staticmethod
+    def _api_release_lease(api: ApiClient, *, resource_id: str):
+        try:
+            return api.release_lease(resource_id=resource_id)
+        except TypeError:
+            return api.release_lease()
+
+    @staticmethod
+    def _api_current_lease(api: ApiClient, *, resource_id: str):
+        try:
+            return api.current_lease(resource_id=resource_id)
+        except TypeError:
+            return api.current_lease()
 
     def enroll_device(
         self,
@@ -410,12 +446,80 @@ class ClientService:
         return {
             "device_name": config.device_name,
             "server_url": config.server_url,
+            "lease_scope": config.lease_scope,
             "active_superproject": config.sync_active_superproject,
             "queued_checkpoints": len(queue),
+            "queue_health": self.queue_health().model_dump(mode="json"),
             "superprojects": {
                 slug: state.model_dump(mode="json")
                 for slug, state in config.superprojects.items()
             },
+        }
+
+    def set_lease_scope(self, scope: LeaseScope | str) -> dict[str, Any]:
+        normalized = LeaseScope(str(scope))
+        config = self.config()
+        config.lease_scope = normalized
+        self.save_config(config)
+        return {"lease_scope": normalized}
+
+    def _lease_resource_id(self, slug: str) -> str:
+        config = self.config()
+        if config.lease_scope == LeaseScope.SUPERPROJECT:
+            return f"superproject:{slug}"
+        return "global"
+
+    def queue_health(self) -> QueueHealth:
+        queue = self.state_store.load_queue()
+        if not queue:
+            return QueueHealth()
+        now = utc_now()
+        oldest = min(queue, key=lambda item: item.created_at)
+        last_error_item = max(
+            (item for item in queue if item.last_error and item.last_attempt_at),
+            key=lambda item: item.last_attempt_at,
+            default=None,
+        )
+        return QueueHealth(
+            queued_count=len(queue),
+            oldest_item_age_seconds=max(0.0, (now - oldest.created_at).total_seconds()),
+            retry_count=sum(item.retry_count for item in queue),
+            last_error=last_error_item.last_error if last_error_item is not None else None,
+        )
+
+    def queue_status(self) -> dict[str, Any]:
+        queue = self.state_store.load_queue()
+        now = utc_now()
+        items = [
+            {
+                "queue_id": item.queue_id,
+                "superproject_slug": item.superproject_slug,
+                "thread_id": item.checkpoint.thread_id,
+                "created_at": item.created_at.isoformat(),
+                "age_seconds": max(0.0, (now - item.created_at).total_seconds()),
+                "retry_count": item.retry_count,
+                "last_attempt_at": item.last_attempt_at.isoformat() if item.last_attempt_at else None,
+                "last_error": item.last_error,
+            }
+            for item in queue
+        ]
+        pending_conflicts: dict[str, int] = {}
+        try:
+            api = self.api_client()
+        except RuntimeError:
+            api = None
+        if api is not None:
+            for slug in self.config().superprojects:
+                try:
+                    metadata = self._load_update_metadata(api, slug)
+                except Exception:
+                    continue
+                if metadata.pending_resolutions:
+                    pending_conflicts[slug] = len(metadata.pending_resolutions)
+        return {
+            "queue_health": self.queue_health().model_dump(mode="json"),
+            "items": items,
+            "pending_conflicts": pending_conflicts,
         }
 
     def local_threads(self) -> list[ThreadSummary]:
@@ -502,6 +606,23 @@ class ClientService:
         config.superprojects[slug] = local_state
         self.save_config(config)
         return thread.model_copy(update={"tracked": True})
+
+    def untrack_thread(self, slug: str, thread_ref: str) -> dict[str, Any]:
+        local_state = self._get_superproject_state(slug)
+        thread = self._match_thread_anywhere(slug, thread_ref)
+        local_state.tracked_thread_ids = [
+            thread_id
+            for thread_id in local_state.tracked_thread_ids
+            if thread_id != thread.thread_id
+        ]
+        config = self.config()
+        config.superprojects[slug] = local_state
+        self.save_config(config)
+        return {
+            "slug": slug,
+            "thread_id": thread.thread_id,
+            "tracked": False,
+        }
 
     def _match_thread_from_summaries(
         self,
@@ -846,23 +967,257 @@ class ClientService:
             },
         )()
 
+    @staticmethod
+    def _doc_diff_from_manifest(
+        managed_root: Path,
+        local_state: ClientSuperprojectState,
+        manifest: Any,
+    ) -> DiffSummary:
+        local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
+        server_by_path = {record.relative_path: record for record in manifest.managed_files}
+        local_by_path = {document.record.relative_path: document.record for document in local_documents}
+        return DiffSummary(
+            new_on_server=sorted(set(server_by_path) - set(local_by_path)),
+            new_local=sorted(set(local_by_path) - set(server_by_path)),
+            changed=sorted(
+                path
+                for path in set(server_by_path) & set(local_by_path)
+                if server_by_path[path].sha256 != local_by_path[path].sha256
+            ),
+        )
+
+    @staticmethod
+    def _thread_updates_from_metadata(
+        local_state: ClientSuperprojectState,
+        metadata: UpdateMetadataResponse,
+    ) -> list[ThreadSummary]:
+        return [
+            summary
+            for summary in metadata.threads
+            if summary.revision is not None
+            and summary.revision > local_state.pending_thread_refreshes.get(summary.thread_id, 0)
+        ]
+
+    def doctor(self, slug: str | None = None) -> DoctorReport:
+        config = self.config()
+        report = DoctorReport(
+            ok=True,
+            superproject_slug=slug,
+            lease_scope=config.lease_scope,
+            queue_health=self.queue_health(),
+        )
+        if not config.server_url or not config.device_id:
+            report.checks.append(
+                DoctorCheck(
+                    name="enrollment",
+                    status=DoctorStatus.ERROR,
+                    detail="This device is not enrolled yet.",
+                )
+            )
+            report.ok = False
+            return report
+
+        try:
+            api = self.api_client()
+            server_info = api.server_info()
+            report.checks.append(
+                DoctorCheck(
+                    name="server",
+                    status=DoctorStatus.OK,
+                    detail=(
+                        f"Connected to {config.server_url}; schema version {server_info.schema_version}; "
+                        f"shared skills {server_info.shared_skills_count}."
+                    ),
+                )
+            )
+        except Exception as exc:
+            report.checks.append(
+                DoctorCheck(
+                    name="server",
+                    status=DoctorStatus.ERROR,
+                    detail=f"Server is unreachable or rejected the request: {exc}",
+                )
+            )
+            report.ok = False
+            return report
+
+        try:
+            from cws.server.db import ServerDatabase
+
+            expected_schema_version = ServerDatabase.MIGRATIONS[-1][0]
+        except Exception:
+            expected_schema_version = server_info.schema_version
+        if server_info.schema_version < expected_schema_version:
+            report.checks.append(
+                DoctorCheck(
+                    name="schema",
+                    status=DoctorStatus.WARNING,
+                    detail=(
+                        f"Server schema version is {server_info.schema_version}; "
+                        f"client expects at least {expected_schema_version}."
+                    ),
+                )
+            )
+        else:
+            report.checks.append(
+                DoctorCheck(
+                    name="schema",
+                    status=DoctorStatus.OK,
+                    detail=f"Server schema version {server_info.schema_version} is current.",
+                )
+            )
+
+        if not self.codex_root.exists():
+            report.checks.append(
+                DoctorCheck(
+                    name="codex-root",
+                    status=DoctorStatus.ERROR,
+                    detail=f"Codex root does not exist at {self.codex_root}.",
+                )
+            )
+            report.ok = False
+        else:
+            try:
+                local_thread_count = len(self.local_threads())
+                report.checks.append(
+                    DoctorCheck(
+                        name="codex-root",
+                        status=DoctorStatus.OK,
+                        detail=f"Codex root is readable; found {local_thread_count} local thread(s).",
+                    )
+                )
+            except Exception as exc:
+                report.checks.append(
+                    DoctorCheck(
+                        name="codex-root",
+                        status=DoctorStatus.ERROR,
+                        detail=f"Failed to read local Codex state: {exc}",
+                    )
+                )
+                report.ok = False
+
+        if slug is None:
+            return report
+
+        local_state = self._get_superproject_state(slug)
+        resource_id = self._lease_resource_id(slug)
+        try:
+            lease = self._api_current_lease(api, resource_id=resource_id).lease
+            if lease.device_id and lease.device_id != config.device_id:
+                report.checks.append(
+                    DoctorCheck(
+                        name="lease",
+                        status=DoctorStatus.WARNING,
+                        detail=f"Lease {resource_id} is currently owned by {lease.device_id}.",
+                    )
+                )
+            else:
+                report.checks.append(
+                    DoctorCheck(
+                        name="lease",
+                        status=DoctorStatus.OK,
+                        detail=(
+                            f"Lease {resource_id} is available."
+                            if not lease.device_id
+                            else f"Lease {resource_id} is already owned by this device."
+                        ),
+                    )
+                )
+        except Exception as exc:
+            report.checks.append(
+                DoctorCheck(
+                    name="lease",
+                    status=DoctorStatus.WARNING,
+                    detail=f"Could not determine current lease owner: {exc}",
+                )
+            )
+
+        metadata = self._load_update_metadata(api, slug)
+        if not local_state.managed_root:
+            report.checks.append(
+                DoctorCheck(
+                    name="managed-root",
+                    status=DoctorStatus.ERROR,
+                    detail="Managed docs root is not configured for this superproject.",
+                )
+            )
+            report.ok = False
+            return report
+
+        managed_root = Path(local_state.managed_root)
+        diff = self._doc_diff_from_manifest(managed_root, local_state, metadata.manifest)
+        report.stale_docs = diff.has_mismatch
+        stale_threads = self._thread_updates_from_metadata(local_state, metadata)
+        report.stale_threads = [summary.thread_id for summary in stale_threads]
+        report.stale_shared_runtime = bool(
+            metadata.shared_checkpoint is not None
+            and metadata.shared_checkpoint.revision > local_state.last_shared_bundle_revision
+        )
+        report.stale_shared_skills = bool(
+            metadata.shared_skills_revision
+            and metadata.shared_skills_revision != local_state.last_shared_skill_catalog_revision
+        )
+
+        report.checks.append(
+            DoctorCheck(
+                name="skills",
+                status=DoctorStatus.WARNING if report.stale_shared_skills else DoctorStatus.OK,
+                detail=(
+                    f"Shared skills revision {metadata.shared_skills_revision} is newer on the server."
+                    if report.stale_shared_skills
+                    else "Shared skills are aligned."
+                ),
+            )
+        )
+        report.checks.append(
+            DoctorCheck(
+                name="staleness",
+                status=(
+                    DoctorStatus.ERROR
+                    if (report.stale_docs or report.stale_shared_runtime or report.stale_threads)
+                    else DoctorStatus.OK
+                ),
+                detail=(
+                    f"Stale state detected: docs={report.stale_docs}, "
+                    f"shared_runtime={report.stale_shared_runtime}, "
+                    f"threads={len(report.stale_threads)}."
+                    if (report.stale_docs or report.stale_shared_runtime or report.stale_threads)
+                    else "Local docs, runtime, and tracked thread revisions are current."
+                ),
+            )
+        )
+        if report.stale_docs or report.stale_shared_runtime or report.stale_threads:
+            report.ok = False
+        return report
+
     def compare_with_server(self, slug: str) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
         managed_root = Path(local_state.managed_root)
-        local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
-        manifest = self._load_update_metadata(self.api_client(), slug).manifest
-        server_by_path = {record.relative_path: record for record in manifest.managed_files}
-        local_by_path = {document.record.relative_path: document.record for document in local_documents}
-        new_on_server = sorted(set(server_by_path) - set(local_by_path))
-        new_local = sorted(set(local_by_path) - set(server_by_path))
-        changed = sorted(
-            path
-            for path in set(server_by_path) & set(local_by_path)
-            if server_by_path[path].sha256 != local_by_path[path].sha256
+        metadata = self._load_update_metadata(self.api_client(), slug)
+        diff = self._doc_diff_from_manifest(managed_root, local_state, metadata.manifest)
+        thread_updates = self._thread_updates_from_metadata(local_state, metadata)
+        diff.thread_updates = self._dedupe_thread_ids([summary.thread_id for summary in thread_updates])
+        diff.thread_update_names = [
+            summary.thread_name
+            for summary in thread_updates
+        ]
+        diff.shared_runtime_update = bool(
+            metadata.shared_checkpoint is not None
+            and metadata.shared_checkpoint.revision > local_state.last_shared_bundle_revision
         )
-        return DiffSummary(new_on_server=new_on_server, new_local=new_local, changed=changed)
+        diff.shared_runtime_revision = (
+            metadata.shared_checkpoint.revision
+            if metadata.shared_checkpoint is not None
+            else None
+        )
+        diff.shared_skills_update = bool(
+            metadata.shared_skills_revision
+            and metadata.shared_skills_revision != local_state.last_shared_skill_catalog_revision
+        )
+        diff.shared_skills_revision = metadata.shared_skills_revision
+        return diff
 
     def _prompt_thread_update_mode(
         self,
@@ -882,6 +1237,18 @@ class ClientService:
             choice = input(typer_message).strip().lower()
             if choice in {"update", "select", "abort"}:
                 return choice
+
+    @staticmethod
+    def _prompt_yes_no(message: str, *, default: bool = False) -> bool:
+        suffix = "[Y/n]" if default else "[y/N]"
+        accepted_yes = {"y", "yes"}
+        accepted_no = {"n", "no", ""}
+        while True:
+            choice = input(f"{message} {suffix}: ").strip().lower()
+            if choice in accepted_yes:
+                return True
+            if choice in accepted_no:
+                return default if choice == "" else False
 
     def _select_server_threads(
         self,
@@ -919,7 +1286,7 @@ class ClientService:
                 selected_ids.add(summary.thread_id)
         return [summary.thread_id for summary in thread_summaries if summary.thread_id in selected_ids]
 
-    def update_from_server(self, slug: str, *, assume_yes: bool = False) -> DiffSummary:
+    def update_from_server(self, slug: str, *, assume_yes: bool = False, dry_run: bool = False) -> DiffSummary:
         local_state = self._get_superproject_state(slug)
         if not local_state.managed_root:
             raise RuntimeError("Managed root is not configured for this superproject.")
@@ -929,39 +1296,65 @@ class ClientService:
         metadata = self._load_update_metadata(api, slug)
         self._adopt_server_name(local_state, metadata.manifest.name)
         self.report_progress(f"Comparing local Markdown for '{slug}' with the server copy...")
-        server_by_path = {record.relative_path: record for record in metadata.manifest.managed_files}
-        local_documents, _ = build_managed_documents(managed_root, local_state.managed_file_ids)
-        local_by_path = {document.record.relative_path: document.record for document in local_documents}
-        diff = DiffSummary(
-            new_on_server=sorted(set(server_by_path) - set(local_by_path)),
-            new_local=sorted(set(local_by_path) - set(server_by_path)),
-            changed=sorted(
-                path
-                for path in set(server_by_path) & set(local_by_path)
-                if server_by_path[path].sha256 != local_by_path[path].sha256
-            ),
-        )
-        thread_updates = [
-            summary
-            for summary in metadata.threads
-            if summary.revision is not None
-            and summary.revision > local_state.pending_thread_refreshes.get(summary.thread_id, 0)
-        ]
+        diff = self._doc_diff_from_manifest(managed_root, local_state, metadata.manifest)
+        thread_updates = self._thread_updates_from_metadata(local_state, metadata)
         diff.thread_updates = self._dedupe_thread_ids([summary.thread_id for summary in thread_updates])
+        diff.thread_update_names = [summary.thread_name for summary in thread_updates]
         apply_shared_checkpoint = (
             metadata.shared_checkpoint is not None
             and metadata.shared_checkpoint.revision > local_state.last_shared_bundle_revision
         )
-        selected_thread_ids = self._select_server_threads(
-            slug,
-            thread_updates,
-            assume_yes=assume_yes,
-            diff=diff,
+        diff.shared_runtime_update = apply_shared_checkpoint
+        diff.shared_runtime_revision = (
+            metadata.shared_checkpoint.revision
+            if metadata.shared_checkpoint is not None
+            else None
         )
+        diff.shared_skills_update = bool(
+            metadata.shared_skills_revision
+            and metadata.shared_skills_revision != local_state.last_shared_skill_catalog_revision
+        )
+        diff.shared_skills_revision = metadata.shared_skills_revision
+        diff.dry_run = dry_run
+        if dry_run:
+            self.report_progress(f"Dry run for '{slug}': no local files or Codex state will be changed.")
+            return diff
+
+        apply_docs = diff.has_mismatch
+        apply_shared_skills = diff.shared_skills_update
+        selected_thread_ids: list[str] | None
+        if assume_yes:
+            selected_thread_ids = [summary.thread_id for summary in thread_updates]
+        else:
+            if diff.has_mismatch:
+                apply_docs = self._prompt_yes_no(
+                    f"Apply Markdown doc updates for '{slug}'? "
+                    f"new_on_server={len(diff.new_on_server)}, new_local={len(diff.new_local)}, changed={len(diff.changed)}",
+                    default=False,
+                )
+            if apply_shared_checkpoint:
+                apply_shared_checkpoint = self._prompt_yes_no(
+                    f"Apply shared Codex runtime update for '{slug}' at revision {diff.shared_runtime_revision}?",
+                    default=False,
+                )
+            if diff.shared_skills_update:
+                apply_shared_skills = self._prompt_yes_no(
+                    f"Apply shared skills update for '{slug}' at revision {diff.shared_skills_revision}?",
+                    default=False,
+                )
+            selected_thread_ids = self._select_server_threads(
+                slug,
+                thread_updates,
+                assume_yes=False,
+                diff=diff,
+            )
         if selected_thread_ids is None:
             self.report_progress(f"Update from server aborted for '{slug}'.")
             return diff
-        if not (diff.has_mismatch or apply_shared_checkpoint or selected_thread_ids):
+        if not (apply_docs or apply_shared_checkpoint or apply_shared_skills or selected_thread_ids):
+            self.report_progress(f"No updates were selected for '{slug}'.")
+            return diff
+        if not (diff.has_mismatch or diff.shared_runtime_update or diff.shared_skills_update or diff.thread_updates):
             local_state.last_alignment_action = AlignmentAction.UPDATE_FROM_SERVER
             local_state.last_aligned_revision = metadata.manifest.revision
             config = self.config()
@@ -975,25 +1368,28 @@ class ClientService:
             UpdatePackageRequest(
                 thread_ids=selected_thread_ids,
                 include_shared_checkpoint=apply_shared_checkpoint,
-                include_managed_documents=diff.has_mismatch,
-                include_shared_skills=True,
+                include_managed_documents=apply_docs,
+                include_shared_skills=apply_shared_skills,
             ),
         )
         self.report_progress(f"Applying server updates for '{slug}'...")
         quarantine_root = self.state_store.paths.cache_dir / "quarantine" / slug / utc_now().strftime("%Y%m%d%H%M%S")
-        for path in diff.new_local:
-            source = managed_root / path
-            if source.exists():
-                target = quarantine_root / path
+        if apply_docs:
+            for path in diff.new_local:
+                source = managed_root / path
+                if source.exists():
+                    target = quarantine_root / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(source.read_bytes())
+                    source.unlink()
+            for document in package.managed_documents:
+                target = managed_root / document.record.relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
-                source.unlink()
-        for document in package.managed_documents:
-            target = managed_root / document.record.relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(target, document.content)
-        self.report_progress(f"Syncing shared skills for '{slug}'...")
-        self._write_shared_skills(package.shared_skills)
+                atomic_write_text(target, document.content)
+        if apply_shared_skills:
+            self.report_progress(f"Syncing shared skills for '{slug}'...")
+            self._write_shared_skills(package.shared_skills)
+            local_state.last_shared_skill_catalog_revision = package.shared_skills_revision
         if (
             apply_shared_checkpoint
             and package.shared_checkpoint is not None
@@ -1029,8 +1425,9 @@ class ClientService:
             record.relative_path: record.file_id
             for record in metadata.manifest.managed_files
         }
-        local_documents, updated_ids = build_managed_documents(managed_root, server_file_ids)
-        local_state.managed_file_ids = updated_ids
+        if apply_docs:
+            local_documents, updated_ids = build_managed_documents(managed_root, server_file_ids)
+            local_state.managed_file_ids = updated_ids
         config = self.config()
         config.superprojects[slug] = local_state
         self.save_config(config)
@@ -1224,6 +1621,9 @@ class ClientService:
                 superproject_slug=checkpoint.superproject_slug,
                 created_at=utc_now(),
                 checkpoint=checkpoint,
+                retry_count=0,
+                last_attempt_at=None,
+                last_error=None,
             )
         )
         self.state_store.save_queue(queue)
@@ -1245,10 +1645,12 @@ class ClientService:
                 self.state_store.save_queue(remaining)
                 return False
             try:
+                item.last_attempt_at = utc_now()
                 response = client.push_checkpoint(
                     item.superproject_slug,
                     PushCheckpointRequest(checkpoint=item.checkpoint),
                 )
+                item.last_error = None
                 try:
                     self._record_thread_revision(
                         item.superproject_slug,
@@ -1257,7 +1659,10 @@ class ClientService:
                     )
                 except Exception:
                     pass
-            except Exception:
+            except Exception as exc:
+                item.retry_count += 1
+                item.last_attempt_at = utc_now()
+                item.last_error = str(exc)
                 remaining.append(item)
             if heartbeat is not None and not heartbeat(client):
                 remaining.extend(queue[index + 1 :])
@@ -1275,8 +1680,9 @@ class ClientService:
             raise RuntimeError(f"No tracked threads are configured for '{slug}'.")
 
         api = self.api_client()
+        resource_id = self._lease_resource_id(slug)
         self.report_progress(f"Acquiring the global live-sync lease for a forced thread push to '{slug}'...")
-        lease = api.acquire_lease(steal=steal)
+        lease = self._api_acquire_lease(api, resource_id=resource_id, steal=steal)
         if not lease.granted:
             raise RuntimeError(
                 f"Another device currently holds the active lease: {lease.conflict_device_id}"
@@ -1314,7 +1720,7 @@ class ClientService:
                     }
                 )
         finally:
-            api.release_lease()
+            self._api_release_lease(api, resource_id=resource_id)
         return pushed
 
     def override_current_state(
@@ -1350,15 +1756,22 @@ class ClientService:
         self.save_config(config)
 
     def turn_on_sync(self, slug: str, *, steal: bool = False) -> str:
-        local_state = self._get_superproject_state(slug)
-        self.report_progress(f"Checking whether '{slug}' is aligned with the server...")
-        diff = self.compare_with_server(slug)
-        if diff.has_mismatch and local_state.last_alignment_action == AlignmentAction.NONE:
+        self.report_progress(f"Running preflight checks for '{slug}'...")
+        report = self.doctor(slug)
+        if report.stale_docs or report.stale_shared_runtime or report.stale_threads:
             raise RuntimeError(
                 "Local state does not match the server. Run update-from-server or override-current-state first."
             )
+        if not report.ok:
+            errors = [
+                f"{check.name}: {check.detail}"
+                for check in report.checks
+                if check.status == DoctorStatus.ERROR
+            ]
+            raise RuntimeError("Preflight failed. " + ("; ".join(errors) if errors else "See cws doctor for details."))
         self.report_progress("Acquiring the global live-sync lease from the server...")
-        lease = self.api_client().acquire_lease(steal=steal)
+        resource_id = self._lease_resource_id(slug)
+        lease = self._api_acquire_lease(self.api_client(), resource_id=resource_id, steal=steal)
         if not lease.granted:
             raise RuntimeError(
                 f"Another device currently holds the active lease: {lease.conflict_device_id}"
@@ -1366,18 +1779,20 @@ class ClientService:
         config = self.config()
         config.sync_active_superproject = slug
         self.save_config(config)
-        self.worker = SyncWorker(self, slug)
+        self.worker = SyncWorker(self, slug, resource_id)
         self.worker.start()
         self.report_progress(f"Live sync started for '{slug}'.")
         return slug
 
     def turn_off_sync(self) -> None:
+        active_slug = self.config().sync_active_superproject
         if self.worker is not None:
             self.worker.stop()
             self.worker.join(timeout=5)
             self.worker = None
         try:
-            self.api_client().release_lease()
+            resource_id = self._lease_resource_id(active_slug) if active_slug else "global"
+            self._api_release_lease(self.api_client(), resource_id=resource_id)
         finally:
             self.mark_sync_inactive()
 
