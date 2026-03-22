@@ -26,11 +26,22 @@ Typical flow:
 
 1. enroll the device if needed with `enroll-device`
 2. attach an existing server superproject with `attach-superproject`, or create a new one with `create-superproject`
-3. run `update-from-server` or `override-current-state`
-4. run `turn-on-sync`
-5. let the shell heartbeat and sync in the background
-6. inspect `status` when changing devices
-7. run `turn-off-sync` manually if desired, or allow the server lease to expire automatically
+3. run `doctor <slug>` to catch stale revisions, queue problems, or lease conflicts before you start
+4. run `update-from-server --dry-run <slug>` if you want a metadata-only preview
+5. run `update-from-server <slug>` or `override-current-state <slug>`
+6. run `turn-on-sync <slug>`
+7. let the shell heartbeat and sync in the background
+8. inspect `status` or `queue-status` when changing devices
+9. run `turn-off-sync` manually if desired, or allow the server lease to expire automatically
+
+`update-from-server` now prompts separately for:
+
+- managed Markdown docs
+- shared Codex runtime
+- shared skills
+- tracked thread payloads
+
+That means the operator can preview or apply only the parts that matter instead of blindly bulk-pulling the whole server state.
 
 For first-time device enrollment from Windows, use:
 
@@ -45,6 +56,18 @@ Prompt meanings during enrollment:
 - `SSH key passphrase`: the passphrase that unlocks the local private key on Windows
 
 Enrollment only registers the device and stores its credentials. It does not automatically create local bindings for server-side superprojects. If a superproject already exists on the server, run `attach-superproject` once on each new machine before using `update-from-server`.
+
+## Operator commands worth knowing
+
+- `status`: includes the configured lease scope and queue health summary
+- `queue-status`: shows queued checkpoint items, pending conflict counts, retry counts, and last known queue error
+- `doctor [slug]`: checks server reachability, schema version, current lease owner, local `.codex` readability, queue health, and stale superproject state
+- `localthreads`: shows local Codex threads with names and last-user-turn previews
+- `threadlist <slug>`: shows server-side tracked threads for one superproject
+- `addthread`, `rename-thread`, `untrack-thread`, `remove-thread`: manage tracked threads explicitly instead of relying on blind thread discovery
+- `set-lease-scope <global|superproject>`: keep the default single active device model or opt into per-superproject lease scoping
+- `force-thread-updates <slug>`: push the currently tracked local thread payloads without turning on full live sync
+
 ## Publishing code from Windows
 
 `codex-workspace-sync` uses the same safe publish pattern as the sibling repos that publish from a sanitized temp checkout.

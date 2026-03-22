@@ -118,6 +118,17 @@ class ServerDatabase:
                 ON thread_metadata (superproject_slug, updated_at DESC);
             """,
         ),
+        (
+            4,
+            "checkpoint_bundle_references",
+            """
+            ALTER TABLE checkpoints ADD COLUMN raw_bundle_id TEXT;
+            ALTER TABLE checkpoints ADD COLUMN shared_bundle_id TEXT;
+
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_superproject_thread_canonical_revision
+                ON checkpoints (superproject_slug, thread_id, canonical, revision DESC);
+            """,
+        ),
     )
 
     def __init__(self, db_path: Path) -> None:

@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import shutil
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from string import Template
@@ -28,7 +29,9 @@ from cws.models import (
     PullStateResponse,
     PushCheckpointRequest,
     PushCheckpointResponse,
+    RawCodexSharedBundle,
     RawFileArtifact,
+    RawSessionBundle,
     RegisterDeviceRequest,
     RegisterDeviceResponse,
     RenameThreadResponse,
@@ -59,7 +62,7 @@ from cws.utils import (
 
 class ServerService:
     heartbeat_timeout_seconds = int(os.environ.get("CWS_HEARTBEAT_TIMEOUT_SECONDS", "120"))
-    checkpoint_retention_per_thread = int(os.environ.get("CWS_CHECKPOINT_RETENTION_PER_THREAD", "20"))
+    checkpoint_retention_per_thread = int(os.environ.get("CWS_CHECKPOINT_RETENTION_PER_THREAD", "5"))
     backup_retention_per_superproject = int(os.environ.get("CWS_BACKUP_RETENTION_PER_SUPERPROJECT", "20"))
 
     def __init__(self, paths: ServerPaths | None = None) -> None:
@@ -511,9 +514,150 @@ class ServerService:
             manifest.model_dump(mode="json"),
         )
 
-    def _latest_checkpoint(self, slug: str, thread_id: str | None = None) -> ThreadCheckpoint | None:
+    @staticmethod
+    def _bundle_storage_id(
+        bundle: RawSessionBundle | RawCodexSharedBundle,
+        *,
+        thread_id: str | None = None,
+    ) -> str:
+        digest_entries = [
+            {
+                "relative_path": artifact.relative_path,
+                "sha256": artifact.sha256,
+            }
+            for artifact in bundle.files
+        ]
+        return sha256_text(
+            json.dumps(
+                {
+                    "thread_id": thread_id,
+                    "thread_name": getattr(bundle, "thread_name", None),
+                    "thread_updated_at": (
+                        getattr(bundle, "thread_updated_at", None).isoformat()
+                        if getattr(bundle, "thread_updated_at", None) is not None
+                        else None
+                    ),
+                    "last_user_turn_preview": getattr(bundle, "last_user_turn_preview", None),
+                    "files": digest_entries,
+                },
+                sort_keys=True,
+            )
+        )
+
+    def _raw_bundle_path(self, slug: str, bundle_id: str) -> Path:
+        return self._superproject_root(slug) / "raw_codex" / f"{bundle_id}.json"
+
+    def _shared_bundle_path(self, slug: str, bundle_id: str) -> Path:
+        return self._superproject_root(slug) / "raw_codex" / "shared" / f"{bundle_id}.json"
+
+    def _write_bundle_once(
+        self,
+        slug: str,
+        *,
+        raw_bundle: RawSessionBundle | None = None,
+        shared_bundle: RawCodexSharedBundle | None = None,
+        thread_id: str | None = None,
+    ) -> tuple[str | None, str | None]:
+        raw_bundle_id: str | None = None
+        shared_bundle_id: str | None = None
+        if raw_bundle is not None:
+            raw_bundle_id = self._bundle_storage_id(raw_bundle, thread_id=thread_id)
+            raw_path = self._raw_bundle_path(slug, raw_bundle_id)
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            if not raw_path.exists():
+                dump_json_file(
+                    raw_path,
+                    raw_bundle.model_dump(mode="json", exclude={"bundle_id"}),
+                )
+        if shared_bundle is not None:
+            shared_bundle_id = self._bundle_storage_id(shared_bundle)
+            shared_path = self._shared_bundle_path(slug, shared_bundle_id)
+            shared_path.parent.mkdir(parents=True, exist_ok=True)
+            if not shared_path.exists():
+                dump_json_file(
+                    shared_path,
+                    shared_bundle.model_dump(mode="json", exclude={"bundle_id"}),
+                )
+        return raw_bundle_id, shared_bundle_id
+
+    def _load_raw_bundle(self, slug: str, bundle_id: str) -> RawSessionBundle | None:
+        path = self._raw_bundle_path(slug, bundle_id)
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.setdefault("bundle_id", bundle_id)
+        return RawSessionBundle.model_validate(payload)
+
+    def _load_shared_bundle(self, slug: str, bundle_id: str) -> RawCodexSharedBundle | None:
+        path = self._shared_bundle_path(slug, bundle_id)
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.setdefault("bundle_id", bundle_id)
+        return RawCodexSharedBundle.model_validate(payload)
+
+    def _thin_checkpoint(self, checkpoint: ThreadCheckpoint) -> ThreadCheckpoint:
+        raw_bundle_id = checkpoint.raw_bundle_id
+        shared_bundle_id = checkpoint.shared_bundle_id
+        if checkpoint.raw_bundle is not None:
+            raw_bundle_id, _ = self._write_bundle_once(
+                checkpoint.superproject_slug,
+                raw_bundle=checkpoint.raw_bundle,
+                thread_id=checkpoint.thread_id,
+            )
+        if checkpoint.shared_bundle is not None:
+            _, shared_bundle_id = self._write_bundle_once(
+                checkpoint.superproject_slug,
+                shared_bundle=checkpoint.shared_bundle,
+            )
+        return checkpoint.model_copy(
+            update={
+                "raw_bundle_id": raw_bundle_id,
+                "raw_bundle": None,
+                "shared_bundle_id": shared_bundle_id,
+                "shared_bundle": None,
+            }
+        )
+
+    def _hydrate_checkpoint_bundles(self, checkpoint: ThreadCheckpoint) -> ThreadCheckpoint:
+        updates: dict[str, Any] = {}
+        if checkpoint.raw_bundle is None and checkpoint.raw_bundle_id:
+            raw_bundle = self._load_raw_bundle(checkpoint.superproject_slug, checkpoint.raw_bundle_id)
+            if raw_bundle is not None:
+                updates["raw_bundle"] = raw_bundle
+        if checkpoint.shared_bundle is None and checkpoint.shared_bundle_id:
+            shared_bundle = self._load_shared_bundle(checkpoint.superproject_slug, checkpoint.shared_bundle_id)
+            if shared_bundle is not None:
+                updates["shared_bundle"] = shared_bundle
+        return checkpoint.model_copy(update=updates) if updates else checkpoint
+
+    def _checkpoint_from_payload(
+        self,
+        slug: str,
+        payload_json: str,
+        *,
+        raw_bundle_id: str | None = None,
+        shared_bundle_id: str | None = None,
+        hydrate: bool = False,
+    ) -> ThreadCheckpoint:
+        checkpoint = ThreadCheckpoint.model_validate(json.loads(payload_json))
+        if raw_bundle_id and checkpoint.raw_bundle_id is None:
+            checkpoint = checkpoint.model_copy(update={"raw_bundle_id": raw_bundle_id})
+        if shared_bundle_id and checkpoint.shared_bundle_id is None:
+            checkpoint = checkpoint.model_copy(update={"shared_bundle_id": shared_bundle_id})
+        if hydrate:
+            checkpoint = self._hydrate_checkpoint_bundles(checkpoint)
+        return checkpoint
+
+    def _latest_checkpoint(
+        self,
+        slug: str,
+        thread_id: str | None = None,
+        *,
+        hydrate: bool = False,
+    ) -> ThreadCheckpoint | None:
         query = """
-            SELECT payload_json
+            SELECT payload_json, raw_bundle_id, shared_bundle_id
             FROM checkpoints
             WHERE superproject_slug = ?
               AND canonical = 1
@@ -527,11 +671,17 @@ class ServerService:
             row = connection.execute(query, tuple(params)).fetchone()
         if row is None:
             return None
-        return ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
+        return self._checkpoint_from_payload(
+            slug,
+            row["payload_json"],
+            raw_bundle_id=row["raw_bundle_id"],
+            shared_bundle_id=row["shared_bundle_id"],
+            hydrate=hydrate,
+        )
 
-    def _latest_shared_checkpoint(self, slug: str) -> ThreadCheckpoint | None:
+    def _latest_shared_checkpoint(self, slug: str, *, hydrate: bool = False) -> ThreadCheckpoint | None:
         query = """
-            SELECT payload_json
+            SELECT payload_json, raw_bundle_id, shared_bundle_id
             FROM checkpoints
             WHERE superproject_slug = ?
               AND canonical = 1
@@ -543,13 +693,19 @@ class ServerService:
             row = connection.execute(query, (slug,)).fetchone()
         if row is None:
             return None
-        return ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
+        return self._checkpoint_from_payload(
+            slug,
+            row["payload_json"],
+            raw_bundle_id=row["raw_bundle_id"],
+            shared_bundle_id=row["shared_bundle_id"],
+            hydrate=hydrate,
+        )
 
-    def _latest_thread_checkpoints(self, slug: str) -> list[ThreadCheckpoint]:
+    def _latest_thread_checkpoints(self, slug: str, *, hydrate: bool = False) -> list[ThreadCheckpoint]:
         with self.db.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT payload_json
+                SELECT payload_json, raw_bundle_id, shared_bundle_id
                 FROM checkpoints
                 WHERE superproject_slug = ?
                   AND canonical = 1
@@ -560,7 +716,13 @@ class ServerService:
         checkpoints: list[ThreadCheckpoint] = []
         seen_thread_ids: set[str] = set()
         for row in rows:
-            checkpoint = ThreadCheckpoint.model_validate(json.loads(row["payload_json"]))
+            checkpoint = self._checkpoint_from_payload(
+                slug,
+                row["payload_json"],
+                raw_bundle_id=row["raw_bundle_id"],
+                shared_bundle_id=row["shared_bundle_id"],
+                hydrate=hydrate,
+            )
             thread_key = checkpoint.thread_id or ""
             if thread_key in seen_thread_ids:
                 continue
@@ -568,10 +730,10 @@ class ServerService:
             checkpoints.append(checkpoint)
         return sorted(checkpoints, key=lambda checkpoint: checkpoint.revision)
 
-    def _latest_thread_checkpoint_map(self, slug: str) -> dict[str, ThreadCheckpoint]:
+    def _latest_thread_checkpoint_map(self, slug: str, *, hydrate: bool = False) -> dict[str, ThreadCheckpoint]:
         return {
             checkpoint.thread_id: checkpoint
-            for checkpoint in self._latest_thread_checkpoints(slug)
+            for checkpoint in self._latest_thread_checkpoints(slug, hydrate=hydrate)
             if checkpoint.thread_id
         }
 
@@ -633,9 +795,9 @@ class ServerService:
         shared_skills, _ = self._shared_skill_catalog()
         return PullStateResponse(
             manifest=manifest,
-            latest_checkpoint=self._latest_checkpoint(slug),
-            shared_checkpoint=self._latest_shared_checkpoint(slug),
-            thread_checkpoints=self._latest_thread_checkpoints(slug),
+            latest_checkpoint=self._latest_checkpoint(slug, hydrate=True),
+            shared_checkpoint=self._latest_shared_checkpoint(slug, hydrate=True),
+            thread_checkpoints=self._latest_thread_checkpoints(slug, hydrate=True),
             pending_resolutions=self._pending_resolutions(slug),
             managed_documents=[
                 ManagedDocument(
@@ -670,7 +832,7 @@ class ServerService:
 
     def update_package(self, slug: str, request: UpdatePackageRequest) -> UpdatePackageResponse:
         manifest = self.get_manifest(slug)
-        checkpoint_map = self._latest_thread_checkpoint_map(slug)
+        checkpoint_map = self._latest_thread_checkpoint_map(slug, hydrate=True)
         thread_ids = list(dict.fromkeys(thread_id for thread_id in request.thread_ids if thread_id))
         shared_skills, shared_skills_revision = self._shared_skill_catalog()
         thread_checkpoints = [
@@ -680,7 +842,7 @@ class ServerService:
         ]
         return UpdatePackageResponse(
             manifest=manifest,
-            shared_checkpoint=self._latest_shared_checkpoint(slug) if request.include_shared_checkpoint else None,
+            shared_checkpoint=self._latest_shared_checkpoint(slug, hydrate=True) if request.include_shared_checkpoint else None,
             shared_skills_revision=shared_skills_revision,
             thread_checkpoints=thread_checkpoints,
             managed_documents=[
@@ -933,8 +1095,227 @@ class ServerService:
             "name": manifest.name,
         }
 
+    def _superproject_slugs(self) -> list[str]:
+        with self.db.connect() as connection:
+            rows = connection.execute("SELECT slug FROM superprojects ORDER BY slug").fetchall()
+        return [str(row["slug"]) for row in rows]
+
+    @staticmethod
+    def _directory_size_bytes(root: Path) -> int:
+        if not root.exists():
+            return 0
+        return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+    def analyze_state(self, slug: str | None = None, *, top_n: int = 15) -> dict[str, Any]:
+        target_slugs = [slug] if slug else self._superproject_slugs()
+        superprojects: list[dict[str, Any]] = []
+        for target_slug in target_slugs:
+            root = self._superproject_root(target_slug)
+            file_count = sum(1 for path in root.rglob("*") if path.is_file()) if root.exists() else 0
+            superprojects.append(
+                {
+                    "slug": target_slug,
+                    "size_bytes": self._directory_size_bytes(root),
+                    "file_count": file_count,
+                }
+            )
+        with self.db.connect() as connection:
+            checkpoint_stats = connection.execute(
+                """
+                SELECT COUNT(*) AS checkpoint_count, COALESCE(SUM(LENGTH(payload_json)), 0) AS payload_bytes
+                FROM checkpoints
+                """
+                + (" WHERE superproject_slug = ?" if slug else ""),
+                ((slug,) if slug else ()),
+            ).fetchone()
+            backup_stats = connection.execute(
+                """
+                SELECT COUNT(*) AS backup_count, COALESCE(SUM(LENGTH(payload_json)), 0) AS payload_bytes
+                FROM backups
+                """
+                + (" WHERE superproject_slug = ?" if slug else ""),
+                ((slug,) if slug else ()),
+            ).fetchone()
+        state_root = self.paths.state_root if slug is None else self._superproject_root(slug)
+        biggest_files = []
+        if state_root.exists():
+            files = sorted(
+                (path for path in state_root.rglob("*") if path.is_file()),
+                key=lambda path: path.stat().st_size,
+                reverse=True,
+            )
+            biggest_files = [
+                {
+                    "path": str(path),
+                    "size_bytes": path.stat().st_size,
+                }
+                for path in files[:top_n]
+            ]
+        return {
+            "state_root": str(state_root),
+            "size_bytes": self._directory_size_bytes(state_root),
+            "db_file": str(self.paths.db_file),
+            "db_size_bytes": self.paths.db_file.stat().st_size if self.paths.db_file.exists() else 0,
+            "checkpoint_count": int(checkpoint_stats["checkpoint_count"]) if checkpoint_stats else 0,
+            "checkpoint_payload_bytes": int(checkpoint_stats["payload_bytes"]) if checkpoint_stats else 0,
+            "backup_count": int(backup_stats["backup_count"]) if backup_stats else 0,
+            "backup_payload_bytes": int(backup_stats["payload_bytes"]) if backup_stats else 0,
+            "superprojects": superprojects,
+            "largest_files": biggest_files,
+        }
+
+    def _compact_checkpoints(self, slug: str) -> int:
+        connection = self.db.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT checkpoint_id, payload_json, raw_bundle_id, shared_bundle_id
+                FROM checkpoints
+                WHERE superproject_slug = ?
+                ORDER BY revision DESC
+                """,
+                (slug,),
+            ).fetchall()
+            rewritten = 0
+            metadata_updates: list[dict[str, Any]] = []
+            for row in rows:
+                checkpoint = self._checkpoint_from_payload(
+                    slug,
+                    row["payload_json"],
+                    raw_bundle_id=row["raw_bundle_id"],
+                    shared_bundle_id=row["shared_bundle_id"],
+                )
+                if checkpoint.thread_id and checkpoint.raw_bundle is not None:
+                    derived_name = self._thread_name_from_raw_bundle(checkpoint)
+                    derived_preview = self._preview_from_raw_bundle(checkpoint)
+                    metadata_updated_at = checkpoint.raw_bundle.thread_updated_at or checkpoint.created_at
+                    metadata_updates.append(
+                        {
+                            "checkpoint": checkpoint,
+                            "thread_name": derived_name or checkpoint.raw_bundle.thread_name,
+                            "last_user_turn_preview": checkpoint.raw_bundle.last_user_turn_preview or derived_preview,
+                            "updated_at": metadata_updated_at,
+                        }
+                    )
+                thin_checkpoint = self._thin_checkpoint(checkpoint)
+                if (
+                    checkpoint.raw_bundle is None
+                    and checkpoint.shared_bundle is None
+                    and row["raw_bundle_id"] == thin_checkpoint.raw_bundle_id
+                    and row["shared_bundle_id"] == thin_checkpoint.shared_bundle_id
+                ):
+                    continue
+                connection.execute(
+                    """
+                    UPDATE checkpoints
+                    SET raw_bundle_id = ?, shared_bundle_id = ?, payload_json = ?
+                    WHERE checkpoint_id = ?
+                    """,
+                    (
+                        thin_checkpoint.raw_bundle_id,
+                        thin_checkpoint.shared_bundle_id,
+                        json.dumps(thin_checkpoint.model_dump(mode="json")),
+                        thin_checkpoint.checkpoint_id,
+                    ),
+                )
+                dump_json_file(
+                    self._checkpoint_json_path(slug, thin_checkpoint.thread_id, thin_checkpoint.revision),
+                    thin_checkpoint.model_dump(mode="json"),
+                )
+                rewritten += 1
+            connection.commit()
+        finally:
+            connection.close()
+        for metadata_update in metadata_updates:
+            self._cache_thread_metadata(
+                slug,
+                metadata_update["checkpoint"],
+                thread_name=metadata_update["thread_name"],
+                last_user_turn_preview=metadata_update["last_user_turn_preview"],
+                updated_at=metadata_update["updated_at"],
+            )
+        return rewritten
+
+    def _compact_backups(self, slug: str) -> int:
+        connection = self.db.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT backup_id, payload_json
+                FROM backups
+                WHERE superproject_slug = ?
+                ORDER BY created_at DESC
+                """,
+                (slug,),
+            ).fetchall()
+            rewritten = 0
+            for row in rows:
+                backup = BackupRecord.model_validate(json.loads(row["payload_json"]))
+                latest_checkpoint_payload = backup.snapshot.get("latest_checkpoint")
+                if latest_checkpoint_payload is None:
+                    continue
+                checkpoint = ThreadCheckpoint.model_validate(latest_checkpoint_payload)
+                thin_checkpoint = self._thin_checkpoint(checkpoint)
+                if checkpoint.raw_bundle is None and checkpoint.shared_bundle is None:
+                    continue
+                backup.snapshot["latest_checkpoint"] = thin_checkpoint.model_dump(mode="json")
+                payload_json = json.dumps(backup.model_dump(mode="json"))
+                connection.execute(
+                    "UPDATE backups SET payload_json = ? WHERE backup_id = ?",
+                    (payload_json, backup.backup_id),
+                )
+                dump_json_file(
+                    self._superproject_root(slug) / "backups" / f"{backup.backup_id}.json",
+                    backup.model_dump(mode="json"),
+                )
+                rewritten += 1
+            connection.commit()
+        finally:
+            connection.close()
+        return rewritten
+
+    def compact_state(self, slug: str | None = None, *, vacuum: bool = True) -> dict[str, Any]:
+        before = self.analyze_state(slug)
+        target_slugs = [slug] if slug else self._superproject_slugs()
+        rewritten_checkpoints = 0
+        rewritten_backups = 0
+        warnings: list[str] = []
+        for target_slug in target_slugs:
+            rewritten_checkpoints += self._compact_checkpoints(target_slug)
+            rewritten_backups += self._compact_backups(target_slug)
+            self._prune_superproject_state(target_slug)
+        vacuumed = False
+        if vacuum:
+            try:
+                connection = sqlite3.connect(self.paths.db_file, timeout=5)
+                try:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    connection.execute("PRAGMA journal_mode=DELETE")
+                    connection.execute("VACUUM")
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    vacuumed = True
+                finally:
+                    connection.close()
+            except sqlite3.OperationalError as exc:
+                warnings.append(f"SQLite vacuum skipped: {exc}")
+        after = self.analyze_state(slug)
+        result = {
+            "slug": slug,
+            "rewritten_checkpoints": rewritten_checkpoints,
+            "rewritten_backups": rewritten_backups,
+            "vacuum_requested": vacuum,
+            "vacuumed": vacuumed,
+            "before": before,
+            "after": after,
+            "bytes_reclaimed": max(0, int(before["size_bytes"]) - int(after["size_bytes"])),
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
     def get_thread_checkpoint(self, slug: str, thread_id: str) -> ThreadCheckpoint:
-        checkpoint = self._latest_checkpoint(slug, thread_id)
+        checkpoint = self._latest_checkpoint(slug, thread_id, hydrate=True)
         if checkpoint is None:
             raise FileNotFoundError(f"No checkpoint found for thread '{thread_id}'.")
         return checkpoint
@@ -1018,12 +1399,41 @@ class ServerService:
             / f"{revision}.json"
         )
 
+    @staticmethod
+    def _bundle_ids_from_checkpoint(checkpoint: ThreadCheckpoint) -> tuple[str | None, str | None]:
+        raw_bundle_id = checkpoint.raw_bundle_id or (checkpoint.raw_bundle.bundle_id if checkpoint.raw_bundle else None)
+        shared_bundle_id = checkpoint.shared_bundle_id or (
+            checkpoint.shared_bundle.bundle_id if checkpoint.shared_bundle else None
+        )
+        return raw_bundle_id, shared_bundle_id
+
+    def _backup_bundle_ids(self, slug: str) -> tuple[set[str], set[str]]:
+        raw_bundle_ids: set[str] = set()
+        shared_bundle_ids: set[str] = set()
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM backups WHERE superproject_slug = ?",
+                (slug,),
+            ).fetchall()
+        for row in rows:
+            backup = BackupRecord.model_validate(json.loads(row["payload_json"]))
+            latest_checkpoint_payload = backup.snapshot.get("latest_checkpoint")
+            if latest_checkpoint_payload is None:
+                continue
+            checkpoint = ThreadCheckpoint.model_validate(latest_checkpoint_payload)
+            raw_bundle_id, shared_bundle_id = self._bundle_ids_from_checkpoint(checkpoint)
+            if raw_bundle_id:
+                raw_bundle_ids.add(raw_bundle_id)
+            if shared_bundle_id:
+                shared_bundle_ids.add(shared_bundle_id)
+        return raw_bundle_ids, shared_bundle_ids
+
     def _prune_checkpoint_history(self, slug: str) -> None:
         keep_count = max(1, self.checkpoint_retention_per_thread)
         with self.db.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT checkpoint_id, thread_id, revision, canonical, payload_json
+                SELECT checkpoint_id, thread_id, revision, canonical, payload_json, raw_bundle_id, shared_bundle_id
                 FROM checkpoints
                 WHERE superproject_slug = ?
                 ORDER BY revision DESC
@@ -1042,7 +1452,14 @@ class ServerService:
                 count = seen_per_bucket.get(bucket, 0)
                 if count < bucket_limit:
                     seen_per_bucket[bucket] = count + 1
-                    retained_checkpoints.append(ThreadCheckpoint.model_validate(json.loads(row["payload_json"])))
+                    retained_checkpoints.append(
+                        self._checkpoint_from_payload(
+                            slug,
+                            row["payload_json"],
+                            raw_bundle_id=row["raw_bundle_id"],
+                            shared_bundle_id=row["shared_bundle_id"],
+                        )
+                    )
                     continue
                 delete_rows.append((row["checkpoint_id"], row["thread_id"], row["revision"]))
 
@@ -1058,16 +1475,17 @@ class ServerService:
             if checkpoint_path.exists():
                 checkpoint_path.unlink()
 
-        retained_raw_bundle_ids = {
-            checkpoint.raw_bundle.bundle_id
-            for checkpoint in retained_checkpoints
-            if checkpoint.raw_bundle is not None
-        }
-        retained_shared_bundle_ids = {
-            checkpoint.shared_bundle.bundle_id
-            for checkpoint in retained_checkpoints
-            if checkpoint.shared_bundle is not None
-        }
+        retained_raw_bundle_ids = set()
+        retained_shared_bundle_ids = set()
+        for checkpoint in retained_checkpoints:
+            raw_bundle_id, shared_bundle_id = self._bundle_ids_from_checkpoint(checkpoint)
+            if raw_bundle_id:
+                retained_raw_bundle_ids.add(raw_bundle_id)
+            if shared_bundle_id:
+                retained_shared_bundle_ids.add(shared_bundle_id)
+        backup_raw_bundle_ids, backup_shared_bundle_ids = self._backup_bundle_ids(slug)
+        retained_raw_bundle_ids.update(backup_raw_bundle_ids)
+        retained_shared_bundle_ids.update(backup_shared_bundle_ids)
         raw_root = self._superproject_root(slug) / "raw_codex"
         if raw_root.exists():
             for path in raw_root.glob("*.json"):
@@ -1149,32 +1567,19 @@ class ServerService:
         )
         for document in checkpoint.managed_documents:
             self._write_managed_document(checkpoint.superproject_slug, document)
-        if checkpoint.raw_bundle is not None:
-            raw_root = self._superproject_root(checkpoint.superproject_slug) / "raw_codex"
-            raw_root.mkdir(parents=True, exist_ok=True)
-            dump_json_file(
-                raw_root / f"{checkpoint.raw_bundle.bundle_id}.json",
-                checkpoint.raw_bundle.model_dump(mode="json"),
-            )
-        if checkpoint.shared_bundle is not None:
-            shared_root = self._superproject_root(checkpoint.superproject_slug) / "raw_codex" / "shared"
-            shared_root.mkdir(parents=True, exist_ok=True)
-            dump_json_file(
-                shared_root / f"{checkpoint.shared_bundle.bundle_id}.json",
-                checkpoint.shared_bundle.model_dump(mode="json"),
-            )
+        checkpoint_for_storage = self._thin_checkpoint(checkpoint)
         thread_dir = (
-            self._superproject_root(checkpoint.superproject_slug)
+            self._superproject_root(checkpoint_for_storage.superproject_slug)
             / "threads"
-            / (checkpoint.thread_id or "default")
+            / (checkpoint_for_storage.thread_id or "default")
             / "checkpoints"
         )
         thread_dir.mkdir(parents=True, exist_ok=True)
-        dump_json_file(thread_dir / f"{revision}.json", checkpoint.model_dump(mode="json"))
+        dump_json_file(thread_dir / f"{revision}.json", checkpoint_for_storage.model_dump(mode="json"))
         updated_manifest = incoming_manifest.model_copy(
             update={
                 "revision": revision,
-                "updated_at": checkpoint.created_at,
+                "updated_at": checkpoint_for_storage.created_at,
                 "shared_skill_catalog_revision": shared_skills_revision or incoming_manifest.shared_skill_catalog_revision,
                 "managed_files": [
                     record.model_copy(update={"last_known_good_revision": revision})
@@ -1188,8 +1593,8 @@ class ServerService:
             derived_preview = self._preview_from_raw_bundle(checkpoint)
             metadata_updated_at = checkpoint.raw_bundle.thread_updated_at or checkpoint.created_at
             self._cache_thread_metadata(
-                checkpoint.superproject_slug,
-                checkpoint,
+                checkpoint_for_storage.superproject_slug,
+                checkpoint_for_storage,
                 thread_name=derived_name or checkpoint.raw_bundle.thread_name,
                 last_user_turn_preview=checkpoint.raw_bundle.last_user_turn_preview or derived_preview,
                 updated_at=metadata_updated_at,
@@ -1208,25 +1613,29 @@ class ServerService:
                     base_revision,
                     turn_hashes_json,
                     snapshot_hash,
+                    raw_bundle_id,
+                    shared_bundle_id,
                     payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    checkpoint.checkpoint_id,
-                    checkpoint.superproject_slug,
-                    checkpoint.thread_id,
-                    checkpoint.revision,
-                    checkpoint.created_at.isoformat(),
-                    checkpoint.source_device_id,
-                    1 if checkpoint.canonical else 0,
-                    checkpoint.base_revision,
-                    json.dumps(checkpoint.turn_hashes),
-                    checkpoint.snapshot_hash,
-                    json.dumps(checkpoint.model_dump(mode="json")),
+                    checkpoint_for_storage.checkpoint_id,
+                    checkpoint_for_storage.superproject_slug,
+                    checkpoint_for_storage.thread_id,
+                    checkpoint_for_storage.revision,
+                    checkpoint_for_storage.created_at.isoformat(),
+                    checkpoint_for_storage.source_device_id,
+                    1 if checkpoint_for_storage.canonical else 0,
+                    checkpoint_for_storage.base_revision,
+                    json.dumps(checkpoint_for_storage.turn_hashes),
+                    checkpoint_for_storage.snapshot_hash,
+                    checkpoint_for_storage.raw_bundle_id,
+                    checkpoint_for_storage.shared_bundle_id,
+                    json.dumps(checkpoint_for_storage.model_dump(mode="json")),
                 ),
             )
             connection.commit()
-        self._prune_superproject_state(checkpoint.superproject_slug)
+        self._prune_superproject_state(checkpoint_for_storage.superproject_slug)
         return PushCheckpointResponse(
             accepted=True,
             revision=revision,

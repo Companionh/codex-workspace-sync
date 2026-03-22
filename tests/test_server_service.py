@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -288,9 +289,9 @@ def test_push_checkpoint_prunes_old_history_and_raw_bundles(tmp_path: Path) -> N
 
     assert [row["revision"] for row in rows] == [2, 3]
     assert not (tmp_path / "state" / "superprojects" / "telegram-suite" / "threads" / "thread-a" / "checkpoints" / "1.json").exists()
-    assert not (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / "bundle-0.json").exists()
-    assert (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / "bundle-1.json").exists()
-    assert (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / "bundle-2.json").exists()
+    raw_root = tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex"
+    raw_files = sorted(path.name for path in raw_root.glob("*.json"))
+    assert len(raw_files) == 2
 
 
 def test_pull_state_returns_latest_checkpoint_per_thread(tmp_path: Path) -> None:
@@ -380,6 +381,218 @@ def test_pull_state_returns_latest_checkpoint_per_thread(tmp_path: Path) -> None
     assert state.shared_checkpoint is not None
     assert state.shared_checkpoint.thread_id is None
     assert returned_thread_ids == {None, "thread-a"}
+
+
+def test_push_checkpoint_stores_thin_checkpoint_payload_with_external_bundle_reference(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+
+    checkpoint = ThreadCheckpoint(
+        superproject_slug="telegram-suite",
+        thread_id="thread-a",
+        revision=0,
+        created_at=utc_now(),
+        source_device_id=device.device.device_id,
+        canonical=True,
+        base_revision=manifest.revision,
+        turn_hashes=["turn-a"],
+        summary="thread-a",
+        manifest=manifest,
+        managed_documents=[],
+        raw_bundle=RawSessionBundle(
+            bundle_id="bundle-thread-a",
+            captured_at=utc_now(),
+            thread_id="thread-a",
+            session_ids=["thread-a"],
+            files=[
+                RawFileArtifact(
+                    relative_path="sessions/2026/03/17/thread-a.jsonl",
+                    sha256="session-a",
+                    content_b64=encode_b64(b"thread-a"),
+                )
+            ],
+        ),
+        snapshot_hash="snapshot-thread-a",
+    )
+
+    response = service.push_checkpoint(device.device.device_id, PushCheckpointRequest(checkpoint=checkpoint))
+
+    with service.db.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT payload_json, raw_bundle_id, shared_bundle_id
+            FROM checkpoints
+            WHERE superproject_slug = ? AND thread_id = ? AND revision = ?
+            """,
+            ("telegram-suite", "thread-a", response.revision),
+        ).fetchone()
+
+    stored_payload = json.loads(row["payload_json"])
+    assert stored_payload["raw_bundle"] is None
+    assert stored_payload["shared_bundle"] is None
+    assert stored_payload["raw_bundle_id"] == row["raw_bundle_id"]
+    assert row["shared_bundle_id"] is None
+    assert row["raw_bundle_id"] is not None
+    assert (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / f"{row['raw_bundle_id']}.json").exists()
+
+    hydrated = service.get_thread_checkpoint("telegram-suite", "thread-a")
+    assert hydrated.raw_bundle is not None
+    assert hydrated.raw_bundle.thread_id == "thread-a"
+
+
+def test_compact_state_rewrites_legacy_fat_checkpoint_payloads(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    device = service.register_device(
+        RegisterDeviceRequest(
+            device_name="machine-a",
+            secondary_passphrase="secondary-passphrase",
+        )
+    )
+    service.acquire_lease(AcquireLeaseRequest(device_id=device.device.device_id))
+    manifest = service.create_superproject(
+        CreateSuperprojectRequest(
+            name="Telegram Suite",
+            slug="telegram-suite",
+            subprojects=[],
+        )
+    ).manifest
+
+    legacy_checkpoint = ThreadCheckpoint(
+        checkpoint_id="legacy-thread-a",
+        superproject_slug="telegram-suite",
+        thread_id="thread-a",
+        revision=1,
+        created_at=utc_now(),
+        source_device_id=device.device.device_id,
+        canonical=True,
+        base_revision=0,
+        turn_hashes=["turn-a"],
+        summary="thread-a",
+        manifest=manifest,
+        managed_documents=[],
+        raw_bundle=RawSessionBundle(
+            bundle_id="legacy-bundle-a",
+            captured_at=utc_now(),
+            thread_id="thread-a",
+            thread_name="Legacy thread",
+            last_user_turn_preview="hello\nworld",
+            session_ids=["thread-a"],
+            files=[
+                RawFileArtifact(
+                    relative_path="sessions/2026/03/17/thread-a.jsonl",
+                    sha256="session-a",
+                    content_b64=encode_b64(b"thread-a"),
+                )
+            ],
+        ),
+        snapshot_hash="legacy-snapshot-a",
+    )
+    legacy_payload_json = json.dumps(legacy_checkpoint.model_dump(mode="json"))
+    checkpoint_path = (
+        tmp_path / "state" / "superprojects" / "telegram-suite" / "threads" / "thread-a" / "checkpoints" / "1.json"
+    )
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text(legacy_payload_json, encoding="utf-8")
+    with service.db.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO checkpoints (
+                checkpoint_id,
+                superproject_slug,
+                thread_id,
+                revision,
+                created_at,
+                source_device_id,
+                canonical,
+                base_revision,
+                turn_hashes_json,
+                snapshot_hash,
+                payload_json,
+                raw_bundle_id,
+                shared_bundle_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_checkpoint.checkpoint_id,
+                legacy_checkpoint.superproject_slug,
+                legacy_checkpoint.thread_id,
+                legacy_checkpoint.revision,
+                legacy_checkpoint.created_at.isoformat(),
+                legacy_checkpoint.source_device_id,
+                1,
+                legacy_checkpoint.base_revision,
+                json.dumps(legacy_checkpoint.turn_hashes),
+                legacy_checkpoint.snapshot_hash,
+                legacy_payload_json,
+                None,
+                None,
+            ),
+        )
+        connection.commit()
+
+    result = service.compact_state("telegram-suite", vacuum=False)
+
+    assert result["rewritten_checkpoints"] >= 1
+    with service.db.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT payload_json, raw_bundle_id
+            FROM checkpoints
+            WHERE checkpoint_id = ?
+            """,
+            ("legacy-thread-a",),
+        ).fetchone()
+    compacted_payload = json.loads(row["payload_json"])
+    assert compacted_payload["raw_bundle"] is None
+    assert compacted_payload["raw_bundle_id"] == row["raw_bundle_id"]
+    assert row["raw_bundle_id"] is not None
+    assert (tmp_path / "state" / "superprojects" / "telegram-suite" / "raw_codex" / f"{row['raw_bundle_id']}.json").exists()
+
+    thread_summary = service.list_threads("telegram-suite")[0]
+    assert thread_summary.thread_name == "Legacy thread"
+    assert thread_summary.last_user_turn_preview == "hello\nworld"
+
+
+def test_compact_state_tolerates_vacuum_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = make_service(tmp_path)
+    analyze_results = iter(
+        [
+            {"size_bytes": 10},
+            {"size_bytes": 5},
+        ]
+    )
+
+    class FakeConnection:
+        def execute(self, sql: str):
+            if "journal_mode=DELETE" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(service, "analyze_state", lambda slug=None: next(analyze_results))
+    monkeypatch.setattr(service, "_superproject_slugs", lambda: [])
+    monkeypatch.setattr("cws.server.service.sqlite3.connect", lambda *args, **kwargs: FakeConnection())
+
+    result = service.compact_state(vacuum=True)
+
+    assert result["vacuum_requested"] is True
+    assert result["vacuumed"] is False
+    assert result["warnings"] == ["SQLite vacuum skipped: database is locked"]
 
 
 def test_delete_superproject_removes_server_state(tmp_path: Path) -> None:

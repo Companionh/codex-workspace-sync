@@ -7,6 +7,7 @@
 The repo contains:
 
 - a Windows-first client CLI and shell
+- queue-aware recovery and preflight tooling for operators
 - a FastAPI server with SQLite metadata and filesystem-backed state
 - templates for new superprojects
 - global shared skills that any superproject can pull
@@ -16,9 +17,11 @@ The repo contains:
 
 - The server is authoritative for live superproject state.
 - Devices initiate heartbeats; the server does not poll clients.
-- A global active lease prevents multiple devices from live-syncing at once.
+- Live sync uses a global lease by default, with optional per-superproject lease scoping.
 - Missing heartbeats for 2 minutes automatically expire the active lease.
+- Metadata is fetched before bulk state so the operator can see what will change first.
 - Raw Codex artifacts are synced for resume fidelity.
+- Shared Codex runtime state, thread payloads, and shared skills are versioned separately.
 - Normalized checkpoints and manifests are synced for validation and recovery.
 - Suspicious deletes and destructive Markdown drift are quarantined instead of auto-propagated.
 
@@ -28,6 +31,7 @@ The repo contains:
 - The sync model is designed for one active live-sync device at a time.
 - The repo is intended to be transparent and hackable rather than fully automated or consumer-friendly.
 - The codebase currently has automated tests, but the operational workflow still assumes a technically comfortable operator.
+- `cws doctor` and metadata-first `update-from-server --dry-run` are the main safety rails before live sync.
 
 ## Known limitations
 
@@ -56,7 +60,8 @@ The repo contains:
 3. Initialize the server: `cws-server init`
 4. Start the API: `cws-server serve`
 5. Enroll a Windows device: `cws enroll-device`
-6. Launch the sync shell: `scripts\\windows\\cws-shell.bat`
+6. Run a preflight check: `cws doctor`
+7. Launch the sync shell: `scripts\\windows\\cws-shell.bat`
 
 If you want a Windows launcher that stays open after enrollment succeeds or fails, use:
 
@@ -70,6 +75,19 @@ During enrollment:
 - `Secondary passphrase` means the passphrase you set with `cws-server init` on the server.
 - `SSH password` means the Linux account password and can be left blank for key-based SSH.
 - `SSH key passphrase` means the passphrase that unlocks your local private key.
+
+## Typical operator flow
+
+1. `cws doctor <slug>` to check reachability, lease state, local `.codex` readability, queue health, and stale revisions.
+2. `cws update-from-server <slug> --dry-run` to preview docs, shared runtime, shared skills, and thread changes.
+3. `cws update-from-server <slug>` and choose what to apply.
+4. `cws turn-on-sync <slug>` to start live sync after preflight passes.
+5. `cws status` or `cws queue-status` to inspect queue health and pending retry problems.
+6. `cws turn-off-sync` when you are done, or let the lease expire naturally.
+
+If you only want to force the currently tracked local threads up to the server, use:
+
+- `cws force-thread-updates <slug>`
 
 ## Security notes
 
@@ -138,13 +156,24 @@ They install:
 ## Key commands
 
 - `cws shell`
+- `cws doctor [<slug>]`
+- `cws queue-status`
 - `cws enroll-device`
 - `cws create-superproject`
 - `cws attach-superproject`
+- `cws rename-superproject <slug> <new-name>`
 - `cws disconnect-superproject <slug>`
 - `cws delete-superproject-server <slug> [--force]`
-- `cws update-from-server <slug>`
+- `cws localthreads`
+- `cws threadlist <slug>`
+- `cws addthread <slug> <thread-id-or-name>`
+- `cws rename-thread <slug> <thread-id-or-name> <new-name>`
+- `cws untrack-thread <slug> <thread-id-or-name>`
+- `cws remove-thread <slug> <thread-id-or-name>`
+- `cws update-from-server <slug> [--dry-run]`
 - `cws override-current-state <slug>`
+- `cws force-thread-updates <slug> [--steal]`
+- `cws set-lease-scope <global|superproject>`
 - `cws turn-on-sync <slug>`
 - `cws turn-off-sync`
 - `cws status`

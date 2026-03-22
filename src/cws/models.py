@@ -134,7 +134,9 @@ class ThreadCheckpoint(BaseModel):
     summary: str | None = None
     manifest: SuperprojectManifest
     managed_documents: list[ManagedDocument] = Field(default_factory=list)
+    raw_bundle_id: str | None = None
     raw_bundle: RawSessionBundle | None = None
+    shared_bundle_id: str | None = None
     shared_bundle: RawCodexSharedBundle | None = None
     snapshot_hash: str
 

@@ -58,5 +58,26 @@ def serve(
     uvicorn.run("cws.server.app:app", host=host, port=port, reload=False)
 
 
+@app.command("analyze-state")
+def analyze_state(
+    slug: str | None = typer.Option(None, "--slug"),
+    app_root: Path | None = typer.Option(None),
+    state_root: Path | None = typer.Option(None),
+) -> None:
+    service = _service(app_root, state_root)
+    typer.echo(json.dumps(service.analyze_state(slug), indent=2))
+
+
+@app.command("compact-state")
+def compact_state(
+    slug: str | None = typer.Option(None, "--slug"),
+    vacuum: bool = typer.Option(True, "--vacuum/--no-vacuum"),
+    app_root: Path | None = typer.Option(None),
+    state_root: Path | None = typer.Option(None),
+) -> None:
+    service = _service(app_root, state_root)
+    typer.echo(json.dumps(service.compact_state(slug, vacuum=vacuum), indent=2))
+
+
 if __name__ == "__main__":
     app()
